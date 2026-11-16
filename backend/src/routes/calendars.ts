@@ -65,7 +65,7 @@ function validateHoliday(body: unknown) {
   if (!isISODate(date)) errors.date = 'Date is required.';
   if (!name) errors.name = 'Holiday name is required.';
   else if (name.length > 100) errors.name = 'Use at most 100 characters.';
-  if (type !== 'public' && type !== 'company') errors.type = 'Type is required.';
+  if (!['public', 'state', 'company'].includes(type)) errors.type = 'Type is required.';
   assertValid(errors);
   return { date, name, type };
 }

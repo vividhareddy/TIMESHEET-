@@ -182,7 +182,9 @@ projectsRouter.delete('/:id', requireRole('admin'), async (req, res) => {
     if (!result.rowCount) throw new HttpError(404, 'Project not found.');
   } catch (err) {
     // Once allocations / timesheets reference projects, deleting a used project is refused (deactivate it instead).
-    if ((err as { code?: string }).code === '23503') {
+    // 23503 = foreign_key_violation (NO ACTION), 23001 = restrict_violation (ON DELETE RESTRICT).
+    const code = (err as { code?: string }).code;
+    if (code === '23503' || code === '23001') {
       throw new HttpError(409, 'This project has allocations or timesheet records and cannot be deleted. Deactivate it instead.');
     }
     throw err;

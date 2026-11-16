@@ -24,7 +24,7 @@ const ENUMS = {
   ],
   requestStatuses: [opt('pending', 'Pending'), opt('approved', 'Approved'), opt('rejected', 'Rejected')],
   leaveDurations: [opt('full', 'Full Day'), opt('half', 'Half Day')],
-  holidayTypes: [opt('public', 'Public holiday'), opt('company', 'Company holiday')],
+  holidayTypes: [opt('public', 'Public holiday'), opt('state', 'State holiday'), opt('company', 'Company holiday')],
   overtimeApprovers: [opt('project_manager', 'Project manager of the project'), opt('reporting_manager', "Employee's reporting manager"), opt('admin', 'Administrator')],
 };
 const COUNTRIES = new Set(['US', 'IN']);
@@ -164,11 +164,14 @@ organisationRouter.delete('/lookups/work-locations/:id', requireRole('admin'), a
 
 // ----------------------------------------------------------------- settings
 
-async function readSettings(org: string) {
+export type OrgSettings = typeof DEFAULT_SETTINGS & { organisationName: string };
+export type OvertimePolicy = typeof DEFAULT_POLICY;
+
+export async function readSettings(org: string): Promise<OrgSettings> {
   const { rows } = await pool.query<{ name: string; settings: Record<string, unknown> }>('SELECT name, settings FROM organisations WHERE id = $1', [org]);
   const row = rows[0];
   if (!row) throw new HttpError(404, 'Organisation not found.');
-  return { organisationName: row.name, ...DEFAULT_SETTINGS, ...row.settings };
+  return { organisationName: row.name, ...DEFAULT_SETTINGS, ...row.settings } as OrgSettings;
 }
 
 organisationRouter.get('/settings', async (_req, res) => {
@@ -207,10 +210,10 @@ organisationRouter.put('/settings', requireRole('admin'), async (req, res) => {
 
 // ---------------------------------------------------------- overtime policy
 
-async function readPolicy(org: string) {
+export async function readPolicy(org: string): Promise<OvertimePolicy> {
   const { rows } = await pool.query<{ overtime_policy: Record<string, unknown> }>('SELECT overtime_policy FROM organisations WHERE id = $1', [org]);
   if (!rows[0]) throw new HttpError(404, 'Organisation not found.');
-  return { ...DEFAULT_POLICY, ...rows[0].overtime_policy };
+  return { ...DEFAULT_POLICY, ...rows[0].overtime_policy } as OvertimePolicy;
 }
 
 organisationRouter.get('/policies/overtime', async (_req, res) => {

@@ -102,6 +102,114 @@ CREATE UNIQUE INDEX IF NOT EXISTS projects_code_key ON projects (organisation_id
 CREATE UNIQUE INDEX IF NOT EXISTS projects_name_key ON projects (organisation_id, lower(name));
 CREATE INDEX IF NOT EXISTS projects_manager_idx ON projects (manager_id);
 
+-- Holidays can also be state / regional holidays (e.g. Indian state holidays).
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'holidays_type_check' AND pg_get_constraintdef(oid) LIKE '%state%') THEN
+    ALTER TABLE holidays DROP CONSTRAINT IF EXISTS holidays_type_check;
+    ALTER TABLE holidays ADD CONSTRAINT holidays_type_check CHECK (type IN ('public', 'state', 'company'));
+  END IF;
+END $$;
+
+-- Resource allocations: one employee can be on several projects. Rows are kept (not deleted) once time is logged against them.
+CREATE TABLE IF NOT EXISTS allocations (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organisation_id  uuid NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+  employee_id      uuid NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+  project_id       uuid NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  project_role     varchar(100) NOT NULL DEFAULT 'Team member',
+  weekly_hours     numeric(5,2) NOT NULL CHECK (weekly_hours > 0 AND weekly_hours <= 60),
+  start_date       date NOT NULL,
+  end_date         date NOT NULL,
+  created_by       uuid NULL REFERENCES employees(id) ON DELETE SET NULL,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  updated_at       timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT allocations_dates_check CHECK (end_date >= start_date)
+);
+CREATE INDEX IF NOT EXISTS allocations_employee_idx ON allocations (employee_id, start_date, end_date);
+CREATE INDEX IF NOT EXISTS allocations_project_idx ON allocations (project_id);
+
+-- One weekly timesheet per employee per week (weeks start on Monday).
+CREATE TABLE IF NOT EXISTS timesheets (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organisation_id  uuid NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+  employee_id      uuid NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+  week_start       date NOT NULL CHECK (EXTRACT(ISODOW FROM week_start) = 1),
+  submitted_at     timestamptz NULL,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  updated_at       timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT timesheets_employee_week_key UNIQUE (employee_id, week_start)
+);
+CREATE INDEX IF NOT EXISTS timesheets_week_idx ON timesheets (organisation_id, week_start);
+
+-- One row per project on a weekly timesheet; hours[1..7] = Monday..Sunday. Approved per project.
+CREATE TABLE IF NOT EXISTS timesheet_entries (
+  timesheet_id     uuid NOT NULL REFERENCES timesheets(id) ON DELETE CASCADE,
+  project_id       uuid NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  position         smallint NOT NULL DEFAULT 0,
+  hours            numeric(4,2)[] NOT NULL CHECK (cardinality(hours) = 7 AND 0 <= ALL (hours) AND 24 >= ALL (hours)),
+  original_hours   numeric(4,2)[] NULL CHECK (original_hours IS NULL OR cardinality(original_hours) = 7),
+  description      text NOT NULL DEFAULT '',
+  status           varchar(10) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'pending', 'approved', 'rejected', 'returned')),
+  manager_comment  text NULL,
+  reviewed_by      uuid NULL REFERENCES employees(id) ON DELETE SET NULL,
+  reviewed_at      timestamptz NULL,
+  updated_at       timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (timesheet_id, project_id)
+);
+CREATE INDEX IF NOT EXISTS timesheet_entries_project_idx ON timesheet_entries (project_id, status);
+
+-- Audit trail: saves, submissions, approvals, rejections, returns, modifications and reopenings.
+CREATE TABLE IF NOT EXISTS timesheet_events (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  timesheet_id     uuid NOT NULL REFERENCES timesheets(id) ON DELETE CASCADE,
+  at               timestamptz NOT NULL DEFAULT now(),
+  actor_id         uuid NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+  action           varchar(12) NOT NULL CHECK (action IN ('saved', 'submitted', 'resubmitted', 'approved', 'rejected', 'returned', 'modified', 'reopened')),
+  project_id       uuid NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  comment          text NULL
+);
+CREATE INDEX IF NOT EXISTS timesheet_events_timesheet_idx ON timesheet_events (timesheet_id, at);
+
+-- Leave requests. Withdrawn requests are kept with status 'withdrawn' (hidden from the API) instead of being deleted.
+CREATE TABLE IF NOT EXISTS leave_requests (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organisation_id  uuid NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+  employee_id      uuid NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+  date             date NOT NULL,
+  duration         varchar(4) NOT NULL CHECK (duration IN ('full', 'half')),
+  hours            numeric(4,2) NOT NULL CHECK (hours > 0),
+  reason           text NOT NULL,
+  status           varchar(10) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'withdrawn')),
+  applied_on       timestamptz NOT NULL DEFAULT now(),
+  reviewer_id      uuid NULL REFERENCES employees(id) ON DELETE SET NULL,
+  reviewer_comment text NULL,
+  reviewed_at      timestamptz NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS leave_requests_active_day_key ON leave_requests (employee_id, date) WHERE status IN ('pending', 'approved');
+CREATE INDEX IF NOT EXISTS leave_requests_employee_idx ON leave_requests (employee_id, date);
+
+-- Overtime, kept separate from ordinary timesheet hours: auto-flagged from timesheets or requested in advance.
+CREATE TABLE IF NOT EXISTS overtime_requests (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  organisation_id  uuid NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+  employee_id      uuid NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+  project_id       uuid NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  week_start       date NOT NULL CHECK (EXTRACT(ISODOW FROM week_start) = 1),
+  date             date NULL,
+  hours            numeric(5,2) NOT NULL CHECK (hours > 0),
+  reason           text NOT NULL,
+  source           varchar(12) NOT NULL CHECK (source IN ('timesheet', 'pre_approval')),
+  status           varchar(10) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  timesheet_id     uuid NULL REFERENCES timesheets(id) ON DELETE RESTRICT,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  reviewer_id      uuid NULL REFERENCES employees(id) ON DELETE SET NULL,
+  reviewer_comment text NULL,
+  reviewed_at      timestamptz NULL,
+  CONSTRAINT overtime_source_check CHECK ((source = 'timesheet') = (timesheet_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS overtime_timesheet_project_key ON overtime_requests (timesheet_id, project_id) WHERE source = 'timesheet';
+CREATE INDEX IF NOT EXISTS overtime_requests_employee_idx ON overtime_requests (employee_id, week_start);
+
 -- Signed-out JWTs (by token id) until they would have expired anyway.
 CREATE TABLE IF NOT EXISTS revoked_tokens (
   jti         uuid PRIMARY KEY,

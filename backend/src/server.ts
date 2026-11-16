@@ -1,11 +1,15 @@
 import { config } from './config.js';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import cors from 'cors';
-import { checkDatabaseConnection, describeDbError, getDbIdentity, pool } from './db.js';
+import { checkDatabaseConnection, checkDatabaseWrite, describeDbError, getDbIdentity, pool } from './db.js';
 import { HttpError, isDbUnavailable } from './http.js';
 import { ensureSchema } from './schema.js';
-import { requireAuth } from './auth.js';
 import { authRouter } from './routes/auth.js';
+import { allocationsRouter } from './routes/allocations.js';
+import { timesheetsRouter, approvalsRouter } from './routes/timesheets.js';
+import { leaveRouter } from './routes/leave.js';
+import { overtimeRouter } from './routes/overtime.js';
+import { reportsRouter } from './routes/reports.js';
 import { employeesRouter } from './routes/employees.js';
 import { organisationRouter } from './routes/organisation.js';
 import { calendarsRouter } from './routes/calendars.js';
@@ -23,11 +27,12 @@ app.get('/api/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', service: 'timesheet-api', timestamp: new Date().toISOString() });
 });
 
-/** Database connectivity check. */
+/** Database connectivity check: reads current_database() and verifies write access (nothing is persisted). */
 app.get('/api/db-test', async (_req: Request, res: Response) => {
   try {
     const { database, user } = await getDbIdentity();
-    res.json({ status: 'connected', database, user });
+    await checkDatabaseWrite();
+    res.json({ status: 'connected', database, user, read: 'ok', write: 'ok' });
   } catch (err) {
     const message = describeDbError(err);
     console.error(`[db] /api/db-test failed: ${message}`);
@@ -40,24 +45,12 @@ app.use('/api/employees', employeesRouter);
 app.use('/api/calendars', calendarsRouter);
 app.use('/api/projects', projectsRouter);
 app.use('/api', organisationRouter); // /lookups, /settings, /policies/overtime
-
-/**
- * Modules whose PostgreSQL implementation has not been built yet. They still require sign-in,
- * then answer 501 so the UI can say so — no placeholder or fabricated data is returned.
- */
-const PENDING_MODULES: Record<string, string> = {
-  '/api/allocations': 'Allocations',
-  '/api/timesheets': 'Timesheets',
-  '/api/approvals': 'Approvals',
-  '/api/leave-requests': 'Leave',
-  '/api/overtime-requests': 'Overtime requests',
-  '/api/reports': 'Reports',
-};
-for (const [path, label] of Object.entries(PENDING_MODULES)) {
-  app.use(path, requireAuth, (_req: Request, res: Response) => {
-    res.status(501).json({ message: `The ${label} module is not connected to the database yet.`, module: label });
-  });
-}
+app.use('/api/allocations', allocationsRouter);
+app.use('/api/timesheets', timesheetsRouter);
+app.use('/api/approvals', approvalsRouter);
+app.use('/api/leave-requests', leaveRouter);
+app.use('/api/overtime-requests', overtimeRouter);
+app.use('/api/reports', reportsRouter);
 
 app.use('/api', (_req: Request, res: Response) => {
   res.status(404).json({ message: 'Not found' });
