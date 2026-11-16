@@ -1,0 +1,93 @@
+/** DEVELOPMENT ONLY — sample holiday calendars for the mock API. */
+import type { AppSettings, Holiday, OvertimePolicy, WorkCalendar } from '@/types';
+
+const h = (date: string, name: string, type: Holiday['type'] = 'public'): Holiday => ({
+  id: `hol-${date}-${name.slice(0, 4).toLowerCase().replace(/\W/g, '')}`,
+  date,
+  name,
+  type,
+});
+
+export const seedCalendars: WorkCalendar[] = [
+  {
+    id: 'cal-us',
+    name: 'US Calendar',
+    country: 'US',
+    timezone: 'America/Chicago',
+    workingDays: [1, 2, 3, 4, 5],
+    hoursPerDay: 8,
+    holidays: [
+      h('2025-11-27', 'Thanksgiving Day'),
+      h('2025-11-28', 'Day after Thanksgiving', 'company'),
+      h('2025-12-25', 'Christmas Day'),
+      h('2026-01-01', "New Year's Day"),
+      h('2026-01-19', 'Martin Luther King Jr. Day'),
+      h('2026-02-16', "Presidents' Day"),
+      h('2026-05-25', 'Memorial Day'),
+      h('2026-06-19', 'Juneteenth'),
+      h('2026-07-03', 'Independence Day (Observed)'),
+      h('2026-09-07', 'Labor Day'),
+      h('2026-11-26', 'Thanksgiving Day'),
+      h('2026-11-27', 'Day after Thanksgiving', 'company'),
+      h('2026-12-24', 'Christmas Eve', 'company'),
+      h('2026-12-25', 'Christmas Day'),
+      h('2027-01-01', "New Year's Day"),
+      h('2027-01-18', 'Martin Luther King Jr. Day'),
+      h('2027-02-15', "Presidents' Day"),
+      h('2027-05-31', 'Memorial Day'),
+    ],
+  },
+  {
+    id: 'cal-in',
+    name: 'India Calendar',
+    country: 'IN',
+    timezone: 'Asia/Kolkata',
+    workingDays: [1, 2, 3, 4, 5],
+    hoursPerDay: 8,
+    holidays: [
+      h('2025-12-25', 'Christmas'),
+      h('2026-01-01', "New Year's Day", 'company'),
+      h('2026-01-14', 'Makar Sankranti / Pongal'),
+      h('2026-01-26', 'Republic Day'),
+      h('2026-03-04', 'Holi'),
+      h('2026-03-19', 'Ugadi'),
+      h('2026-04-03', 'Good Friday'),
+      h('2026-05-01', 'May Day', 'company'),
+      h('2026-08-15', 'Independence Day'),
+      h('2026-09-14', 'Ganesh Chaturthi'),
+      h('2026-10-02', 'Gandhi Jayanti'),
+      h('2026-10-20', 'Dussehra'),
+      h('2026-11-09', 'Diwali (Govardhan Puja)', 'company'),
+      h('2026-11-24', 'Guru Nanak Jayanti'),
+      h('2026-12-25', 'Christmas'),
+      h('2027-01-01', "New Year's Day", 'company'),
+      h('2027-01-14', 'Makar Sankranti / Pongal'),
+      h('2027-01-26', 'Republic Day'),
+    ],
+  },
+];
+
+export const seedOvertimePolicy: OvertimePolicy = {
+  enabled: true,
+  dailyThreshold: 8,
+  weeklyThreshold: 40,
+  weekendApplicable: true,
+  holidayApplicable: true,
+  weekdayMultiplier: 1.5,
+  weekendMultiplier: 2,
+  maxWeeklyOvertime: 12,
+  requirePreApproval: false,
+  approver: 'project_manager',
+  autoFlag: true,
+};
+
+export const seedSettings: AppSettings = {
+  organisationName: 'Northwind Technologies',
+  defaultWeeklyTarget: 40,
+  defaultHoursPerDay: 8,
+  hourIncrement: 0.5,
+  requireDescription: true,
+  allowWeekendEntry: true,
+  submissionDeadline: 'Monday 10:00 AM',
+  reminderEnabled: true,
+};

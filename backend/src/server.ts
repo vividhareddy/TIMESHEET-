@@ -1,0 +1,119 @@
+import { config } from './config.js';
+import express, { type NextFunction, type Request, type Response } from 'express';
+import cors from 'cors';
+import { checkDatabaseConnection, describeDbError, getDbIdentity, pool } from './db.js';
+import { HttpError, isDbUnavailable } from './http.js';
+import { ensureSchema } from './schema.js';
+import { requireAuth } from './auth.js';
+import { authRouter } from './routes/auth.js';
+import { employeesRouter } from './routes/employees.js';
+import { organisationRouter } from './routes/organisation.js';
+import { calendarsRouter } from './routes/calendars.js';
+import { projectsRouter } from './routes/projects.js';
+
+const PORT = config.port;
+const CORS_ORIGIN = config.corsOrigin;
+
+const app = express();
+app.use(cors({ origin: CORS_ORIGIN }));
+app.use(express.json({ limit: '100kb' }));
+
+/** Liveness check — does not touch the database. */
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', service: 'timesheet-api', timestamp: new Date().toISOString() });
+});
+
+/** Database connectivity check. */
+app.get('/api/db-test', async (_req: Request, res: Response) => {
+  try {
+    const { database, user } = await getDbIdentity();
+    res.json({ status: 'connected', database, user });
+  } catch (err) {
+    const message = describeDbError(err);
+    console.error(`[db] /api/db-test failed: ${message}`);
+    res.status(503).json({ status: 'error', message });
+  }
+});
+
+app.use('/api/auth', authRouter);
+app.use('/api/employees', employeesRouter);
+app.use('/api/calendars', calendarsRouter);
+app.use('/api/projects', projectsRouter);
+app.use('/api', organisationRouter); // /lookups, /settings, /policies/overtime
+
+/**
+ * Modules whose PostgreSQL implementation has not been built yet. They still require sign-in,
+ * then answer 501 so the UI can say so — no placeholder or fabricated data is returned.
+ */
+const PENDING_MODULES: Record<string, string> = {
+  '/api/allocations': 'Allocations',
+  '/api/timesheets': 'Timesheets',
+  '/api/approvals': 'Approvals',
+  '/api/leave-requests': 'Leave',
+  '/api/overtime-requests': 'Overtime requests',
+  '/api/reports': 'Reports',
+};
+for (const [path, label] of Object.entries(PENDING_MODULES)) {
+  app.use(path, requireAuth, (_req: Request, res: Response) => {
+    res.status(501).json({ message: `The ${label} module is not connected to the database yet.`, module: label });
+  });
+}
+
+app.use('/api', (_req: Request, res: Response) => {
+  res.status(404).json({ message: 'Not found' });
+});
+
+// Express 5 forwards errors from async handlers here. Responses use the { message, fieldErrors? } shape the frontend expects.
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  if (err instanceof HttpError) {
+    res.status(err.status).json({ message: err.message, ...(err.fieldErrors ? { fieldErrors: err.fieldErrors } : {}) });
+    return;
+  }
+  // Malformed JSON body and other client errors raised by Express middleware.
+  const status = (err as { status?: unknown })?.status;
+  if (typeof status === 'number' && status >= 400 && status < 500) {
+    res.status(status).json({ message: status === 400 ? 'The request body is not valid JSON.' : 'Bad request.' });
+    return;
+  }
+  if (isDbUnavailable(err)) {
+    console.error(`[db] ${describeDbError(err)}`);
+    res.status(503).json({ message: 'The database is unavailable. Please try again shortly.' });
+    return;
+  }
+  console.error('[api] Unhandled error:', err);
+  res.status(500).json({ message: 'Something went wrong on the server. Please try again.' });
+});
+
+const server = app.listen(PORT, () => {
+  console.log(`[api] Server listening on http://localhost:${PORT} (CORS origin: ${CORS_ORIGIN})`);
+  void startDatabase();
+});
+
+/** Verifies the connection, then creates any missing tables. The API keeps running if this fails. */
+async function startDatabase(): Promise<void> {
+  if (!(await checkDatabaseConnection())) return;
+  try {
+    await ensureSchema();
+    console.log('[db] Schema ready.');
+  } catch (err) {
+    console.error(`[db] Could not create the schema: ${describeDbError(err)}`);
+  }
+}
+
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[api] Port ${PORT} is already in use. Set a different PORT in backend/.env.`);
+  } else {
+    console.error('[api] Server error:', err.message);
+  }
+  process.exit(1);
+});
+
+async function shutdown(signal: string) {
+  console.log(`[api] ${signal} received, shutting down.`);
+  server.close();
+  await pool.end().catch(() => undefined);
+  process.exit(0);
+}
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
