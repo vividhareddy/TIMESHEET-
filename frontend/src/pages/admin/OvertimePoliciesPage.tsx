@@ -5,7 +5,7 @@ import { useAppData } from '@/context/AppDataContext';
 import { useAsyncAction } from '@/hooks/useAsyncAction';
 import { useReferenceData } from '@/hooks/useLookups';
 import { formatHours, sum } from '@/utils/format';
-import { PageHeader, Alert, Segmented } from '@/components/common/Misc';
+import { PageHeader, Alert } from '@/components/common/Misc';
 import { Card, CardBody, CardHeader } from '@/components/common/Card';
 import { Button } from '@/components/common/Button';
 import { Field, Input, Select, Toggle } from '@/components/forms/FormControls';
@@ -13,27 +13,14 @@ import { OvertimeTable } from '@/components/tables/OvertimeTable';
 import { StatCard } from '@/components/common/StatCard';
 import { CheckCircle2, Hourglass, Timer, XCircle } from 'lucide-react';
 
-/** Fills eligibility fields missing from policies saved before they existed. */
-const normalise = (p: OvertimePolicy): OvertimePolicy => ({ ...p, eligibilityScope: p.eligibilityScope ?? 'all', eligibleDepartments: p.eligibleDepartments ?? [] });
-
 export function OvertimePoliciesPage() {
-  const { policy: savedPolicy, overtime, employees, savePolicy } = useAppData();
-  const policy = normalise(savedPolicy);
+  const { policy, overtime, savePolicy } = useAppData();
   const { busy, run } = useAsyncAction();
   const ref = useReferenceData();
   const [form, setForm] = useState<OvertimePolicy>(policy);
-  useEffect(() => setForm(normalise(savedPolicy)), [savedPolicy]);
+  useEffect(() => setForm(policy), [policy]);
   const dirty = JSON.stringify(form) !== JSON.stringify(policy);
   const set = <K extends keyof OvertimePolicy>(k: K, v: OvertimePolicy[K]) => setForm((f) => ({ ...f, [k]: v }));
-  const toggleDepartment = (name: string, on: boolean) =>
-    set('eligibleDepartments', on ? [...form.eligibleDepartments, name] : form.eligibleDepartments.filter((d) => d !== name));
-  const noDepartmentChosen = form.eligibilityScope === 'departments' && form.eligibleDepartments.length === 0;
-  const active = employees.filter((e) => e.status === 'active');
-  const overrides = active.filter((e) => e.overtimeEligibility && e.overtimeEligibility !== 'inherit');
-  const eligibleCount = active.filter((e) =>
-    e.overtimeEligibility === 'eligible' ||
-    (e.overtimeEligibility !== 'not_eligible' && (form.eligibilityScope === 'all' || form.eligibleDepartments.includes(e.department))),
-  ).length;
 
   const by = (s: string) => sum(overtime.filter((o) => o.status === s).map((o) => o.hours));
 
@@ -45,7 +32,7 @@ export function OvertimePoliciesPage() {
         actions={
           <>
             <Button variant="ghost" icon={RotateCcw} disabled={!dirty} onClick={() => setForm(policy)}>Discard</Button>
-            <Button icon={Save} loading={busy} disabled={!dirty || noDepartmentChosen} onClick={() => run(() => savePolicy(form), { title: 'Overtime policy saved' })}>Save policy</Button>
+            <Button icon={Save} loading={busy} disabled={!dirty} onClick={() => run(() => savePolicy(form), { title: 'Overtime policy saved' })}>Save policy</Button>
           </>
         }
       />
@@ -56,50 +43,6 @@ export function OvertimePoliciesPage() {
         <StatCard label="Pending hours" value={formatHours(by('pending'))} icon={Hourglass} tone="amber" />
         <StatCard label="Rejected hours" value={formatHours(by('rejected'))} icon={XCircle} tone="red" />
       </div>
-
-      <Card className="mb-5">
-        <CardHeader
-          title="Overtime eligibility"
-          description={`Who can earn overtime. With these settings ${eligibleCount} of ${active.length} active employees are eligible.`}
-        />
-        <CardBody className="space-y-4">
-          <Segmented
-            value={form.eligibilityScope}
-            onChange={(v) => set('eligibilityScope', v)}
-            options={[
-              { value: 'all', label: 'All departments' },
-              { value: 'departments', label: 'Selected departments only' },
-            ]}
-          />
-          {form.eligibilityScope === 'departments' && (
-            ref.departments.length === 0 ? (
-              <Alert tone="warning">No departments exist yet. Add them in Settings → Reference data.</Alert>
-            ) : (
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                {ref.departments.map((d) => (
-                  <label key={d.id} className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 rounded border-slate-300"
-                      checked={form.eligibleDepartments.includes(d.name)}
-                      onChange={(e) => toggleDepartment(d.name, e.target.checked)}
-                      disabled={!form.enabled}
-                    />
-                    {d.name}
-                  </label>
-                ))}
-              </div>
-            )
-          )}
-          {noDepartmentChosen && ref.departments.length > 0 && <p className="text-sm text-red-600">Select at least one department, or make all departments eligible.</p>}
-          <p className="text-sm text-slate-500">
-            Individual exceptions are set on each employee (Employees → Edit → Overtime eligibility).
-            {overrides.length > 0
-              ? ` Current exceptions: ${overrides.map((e) => `${e.name} (${e.overtimeEligibility === 'eligible' ? 'always eligible' : 'not eligible'})`).join(', ')}.`
-              : ' No employee has an exception.'}
-          </p>
-        </CardBody>
-      </Card>
 
       <div className="grid gap-5 xl:grid-cols-3">
         <Card>

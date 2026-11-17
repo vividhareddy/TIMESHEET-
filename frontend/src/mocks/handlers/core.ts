@@ -162,7 +162,6 @@ export const coreRoutes = [
     const used = db().employees.filter((e) => e.department === dep.name).length;
     if (used) throw conflict(`${dep.name} is assigned to ${used} employee(s) and cannot be removed.`);
     db().departments = db().departments.filter((d) => d.id !== dep.id);
-    db().policy.eligibleDepartments = (db().policy.eligibleDepartments ?? []).filter((d) => d !== dep.name);
   }, { roles: ['admin'] }),
   route('POST', '/lookups/work-locations', (req) => {
     const body = req.body as WorkLocationInput;

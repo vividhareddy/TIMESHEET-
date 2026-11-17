@@ -52,11 +52,7 @@ const DEFAULT_POLICY = {
   requirePreApproval: false,
   approver: 'project_manager',
   autoFlag: true,
-  /** 'all' = every department is eligible; 'departments' = only those listed (employee overrides still apply). */
-  eligibilityScope: 'all' as 'all' | 'departments',
-  eligibleDepartments: [] as string[],
 };
-const ELIGIBILITY_SCOPES = new Set(['all', 'departments']);
 
 const num = (v: unknown) => (typeof v === 'number' ? v : Number.NaN);
 const bool = (v: unknown, field: string, errors: Record<string, string>) => {
@@ -104,14 +100,6 @@ organisationRouter.delete('/lookups/departments/:id', requireRole('admin'), asyn
   const used = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM employees WHERE organisation_id = $1 AND department = $2', [org, name]);
   if (used.rows[0]?.n) throw new HttpError(409, `${name} is assigned to ${used.rows[0].n} employee(s) and cannot be removed.`);
   await pool.query('DELETE FROM departments WHERE id = $1', [id]);
-  // Drop the department from the overtime-eligible list as well.
-  await pool.query(
-    `UPDATE organisations
-        SET overtime_policy = jsonb_set(overtime_policy, '{eligibleDepartments}',
-              COALESCE((SELECT jsonb_agg(d) FROM jsonb_array_elements(overtime_policy->'eligibleDepartments') d WHERE d <> to_jsonb($2::text)), '[]'::jsonb))
-      WHERE id = $1 AND jsonb_typeof(overtime_policy->'eligibleDepartments') = 'array'`,
-    [org, name],
-  );
   res.status(204).end();
 });
 
@@ -248,20 +236,7 @@ organisationRouter.put('/policies/overtime', requireRole('admin'), async (req, r
     requirePreApproval: bool(b.requirePreApproval, 'requirePreApproval', errors),
     approver: str(b.approver),
     autoFlag: bool(b.autoFlag, 'autoFlag', errors),
-    eligibilityScope: str(b.eligibilityScope) as OvertimePolicy['eligibilityScope'],
-    eligibleDepartments: Array.isArray(b.eligibleDepartments) ? [...new Set(b.eligibleDepartments.map(str).filter(Boolean))] : [],
   };
-  if (!ELIGIBILITY_SCOPES.has(policy.eligibilityScope)) errors.eligibilityScope = 'Select who is eligible for overtime.';
-  if (b.eligibleDepartments !== undefined && !Array.isArray(b.eligibleDepartments)) errors.eligibleDepartments = 'Must be a list of departments.';
-  else if (policy.eligibleDepartments.length) {
-    const { rows } = await pool.query<{ name: string }>('SELECT name FROM departments WHERE organisation_id = $1 AND name = ANY($2::text[])', [org, policy.eligibleDepartments]);
-    const known = new Set(rows.map((r) => r.name));
-    const unknown = policy.eligibleDepartments.filter((d) => !known.has(d));
-    if (unknown.length) errors.eligibleDepartments = `Unknown department(s): ${unknown.join(', ')}.`;
-  }
-  if (policy.eligibilityScope === 'departments' && !policy.eligibleDepartments.length && !errors.eligibleDepartments) {
-    errors.eligibleDepartments = 'Select at least one eligible department, or make all departments eligible.';
-  }
   if (!(policy.dailyThreshold > 0 && policy.dailyThreshold <= 24)) errors.dailyThreshold = 'Enter between 1 and 24 hours.';
   if (!(policy.weeklyThreshold > 0 && policy.weeklyThreshold <= 168)) errors.weeklyThreshold = 'Enter between 1 and 168 hours.';
   if (!(policy.weekdayMultiplier >= 1 && policy.weekdayMultiplier <= 5)) errors.weekdayMultiplier = 'Enter between 1 and 5.';

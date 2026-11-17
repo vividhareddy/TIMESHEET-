@@ -36,7 +36,6 @@ export const authRoutes = [
         status: 'active',
         weeklyCapacity: db().settings.defaultWeeklyTarget,
         joinDate: todayISO(),
-        overtimeEligibility: 'inherit',
       };
       db().employees.push(admin);
       db().credentials[admin.id] = body.password;

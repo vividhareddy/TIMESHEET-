@@ -20,8 +20,6 @@ import { CalendarsPage } from '@/pages/admin/CalendarsPage';
 import { OvertimePoliciesPage } from '@/pages/admin/OvertimePoliciesPage';
 import { AdminReportsPage } from '@/pages/admin/AdminReportsPage';
 import { SettingsPage } from '@/pages/admin/SettingsPage';
-import { PolicyDocumentsPage } from '@/pages/admin/PolicyDocumentsPage';
-import { OtAssistantPage } from '@/pages/OtAssistantPage';
 
 import { AssociateDashboard } from '@/pages/associate/AssociateDashboard';
 import { MyProjectsPage } from '@/pages/associate/MyProjectsPage';
@@ -87,8 +85,6 @@ export function AppRoutes() {
         <Route path="approvals" element={<AdminApprovalsPage />} />
         <Route path="calendars" element={<CalendarsPage />} />
         <Route path="overtime-policies" element={<OvertimePoliciesPage />} />
-        <Route path="policy-documents" element={<PolicyDocumentsPage />} />
-        <Route path="ot-assistant" element={<OtAssistantPage />} />
         <Route path="reports" element={<AdminReportsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFoundPage />} />
@@ -102,7 +98,6 @@ export function AppRoutes() {
         <Route path="calendar" element={<MyCalendarPage />} />
         <Route path="leave" element={<LeaveRequestsPage />} />
         <Route path="overtime" element={<MyOvertimePage />} />
-        <Route path="ot-assistant" element={<OtAssistantPage />} />
         <Route path="submissions" element={<MySubmissionsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>
@@ -114,7 +109,6 @@ export function AppRoutes() {
         <Route path="allocation" element={<ProjectAllocationPage />} />
         <Route path="approvals" element={<TimesheetApprovalsPage />} />
         <Route path="overtime" element={<OvertimeApprovalsPage />} />
-        <Route path="ot-assistant" element={<OtAssistantPage />} />
         <Route path="reports" element={<ManagerReportsPage />} />
         <Route path="calendar" element={<TeamCalendarPage />} />
         <Route path="*" element={<NotFoundPage />} />

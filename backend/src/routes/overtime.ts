@@ -12,16 +12,9 @@ import { directReportIds, managedProjectIds } from '../scope.js';
 import { readPolicy, readSettings, type OvertimePolicy } from './organisation.js';
 import { startOfWeek, weekday } from '../lib/dates.js';
 import { findHoliday, isScheduledDay } from '../lib/workCalc.js';
-import { overtimeEligibility } from '../lib/overtimeEligibility.js';
 
 export const overtimeRouter = Router();
 overtimeRouter.use(requireAuth);
-
-/** GET /api/overtime-requests/eligibility — whether the signed-in employee may earn overtime, and why. */
-overtimeRouter.get('/eligibility', async (_req, res) => {
-  const user = currentUser(res);
-  res.json(overtimeEligibility(user, await readPolicy(user.organisationId)));
-});
 
 /** GET /api/overtime-requests — own; managers also their projects and direct reports; admins all. */
 overtimeRouter.get('/', async (_req, res) => {
@@ -59,8 +52,6 @@ overtimeRouter.post('/', async (req, res) => {
   if (!(hours >= 0.5 && hours <= max) || (hours * 2) % 1 !== 0) errors.hours = `Enter between 0.5 and ${max} hours in 0.5-hour increments.`;
   if (Object.keys(errors).length) throw new HttpError(400, errors.hours && Object.keys(errors).length === 1 ? errors.hours : 'Please correct the highlighted fields.', errors);
   if (!policy.enabled) throw new HttpError(400, 'Overtime is not enabled in your organisation’s overtime policy.');
-  const eligibility = overtimeEligibility(user, policy);
-  if (!eligibility.eligible) throw new HttpError(403, `You are not eligible for overtime. ${eligibility.reason}`);
 
   // Eligibility of the day under the policy and settings.
   const calendar = (await loadCalendars(pool, org)).get(user.calendarId);

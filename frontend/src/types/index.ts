@@ -28,11 +28,7 @@ export interface Employee {
   /** Weekly working-hour target for this employee. */
   weeklyCapacity: number;
   joinDate: ISODate;
-  /** 'inherit' follows the overtime policy's department rule; the others override it for this person. */
-  overtimeEligibility: OvertimeEligibility;
 }
-
-export type OvertimeEligibility = 'inherit' | 'eligible' | 'not_eligible';
 
 export type ProjectStatus = 'active' | 'on_hold' | 'completed' | 'inactive';
 
@@ -193,43 +189,6 @@ export interface OvertimePolicy {
   requirePreApproval: boolean;
   approver: OvertimeApprover;
   autoFlag: boolean;
-  /** 'all' = every department is eligible; 'departments' = only eligibleDepartments (employee overrides still apply). */
-  eligibilityScope: 'all' | 'departments';
-  /** Department names. */
-  eligibleDepartments: string[];
-}
-
-/** GET /overtime-requests/eligibility — the signed-in employee's eligibility. */
-export interface OvertimeEligibilityStatus {
-  eligible: boolean;
-  reason: string;
-}
-
-export type PolicyDocumentStatus = 'draft' | 'approved' | 'archived';
-
-/** An overtime policy document. Only approved documents are visible to employees and used by the OT assistant. */
-export interface PolicyDocument {
-  id: string;
-  title: string;
-  content: string;
-  status: PolicyDocumentStatus;
-  createdByName?: string;
-  updatedByName?: string;
-  approvedByName?: string;
-  approvedAt?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface OtChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-export interface OtAssistantStatus {
-  /** False when the server has no Anthropic API key configured. */
-  enabled: boolean;
-  approvedDocuments: number;
 }
 
 export interface AppSettings {

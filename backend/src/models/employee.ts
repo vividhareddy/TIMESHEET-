@@ -1,5 +1,3 @@
-import type { OvertimeEligibility } from '../lib/overtimeEligibility.js';
-
 export type Role = 'admin' | 'manager' | 'associate';
 export const ROLES: readonly Role[] = ['admin', 'manager', 'associate'];
 
@@ -20,8 +18,6 @@ export interface Employee {
   status: 'active' | 'inactive';
   weeklyCapacity: number;
   joinDate: string;
-  /** 'inherit' follows the overtime policy's department rule; the others override it. */
-  overtimeEligibility: OvertimeEligibility;
 }
 
 export interface EmployeeRow {
@@ -40,12 +36,11 @@ export interface EmployeeRow {
   status: 'active' | 'inactive';
   weekly_capacity: string;
   join_date: string;
-  overtime_eligibility: OvertimeEligibility;
 }
 
 /** Column list for SELECT / RETURNING that matches EmployeeRow. */
 export const EMPLOYEE_COLUMNS = `id, employee_code, name, email, phone, department, designation, work_location, country,
-  calendar_id, manager_id, system_role, status, weekly_capacity, to_char(join_date, 'YYYY-MM-DD') AS join_date, overtime_eligibility`;
+  calendar_id, manager_id, system_role, status, weekly_capacity, to_char(join_date, 'YYYY-MM-DD') AS join_date`;
 
 export function toEmployee(r: EmployeeRow): Employee {
   return {
@@ -64,6 +59,5 @@ export function toEmployee(r: EmployeeRow): Employee {
     status: r.status,
     weeklyCapacity: Number(r.weekly_capacity),
     joinDate: r.join_date,
-    overtimeEligibility: r.overtime_eligibility,
   };
 }

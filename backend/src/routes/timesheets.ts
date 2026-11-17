@@ -20,7 +20,6 @@ import { canSee, managedProjectIds, visibleEmployeeIds } from '../scope.js';
 import { readPolicy, readSettings, type OvertimePolicy } from './organisation.js';
 import { addDays, currentWeekStart, startOfWeek, sum, weekDates } from '../lib/dates.js';
 import { allocationsForWeek, computeOvertime, dailyTotals, entryTotal, expectedWeekHours } from '../lib/workCalc.js';
-import { overtimeEligibility } from '../lib/overtimeEligibility.js';
 
 const MAX_DESCRIPTION = 2000;
 
@@ -56,8 +55,6 @@ async function syncOvertime(db: Db, org: string, ts: Timesheet, policy: Overtime
   if (!policy.enabled || !policy.autoFlag) return;
   const employees = await loadEmployees(db, org);
   const emp = employees.get(ts.employeeId);
-  // Hours of employees who are not eligible are ordinary hours, not overtime.
-  if (!emp || !overtimeEligibility(emp, policy).eligible) return;
   const calendars = await loadCalendars(db, org);
   const breakdown = computeOvertime(ts.entries.filter((e) => e.status !== 'draft'), ts.weekStart, calendars.get(emp?.calendarId ?? ''), policy);
   for (const [projectId, hours] of Object.entries(breakdown.byProject)) {
@@ -149,7 +146,7 @@ async function saveOwnTimesheet(user: AuthUser, body: unknown, submit: boolean):
       for (const e of editable) e.status = 'pending';
 
       // Overtime policy: weekly maximum and (optionally) mandatory pre-approval.
-      if (policy.enabled && overtimeEligibility(user, policy).eligible) {
+      if (policy.enabled) {
         const ot = computeOvertime(entries.filter((e) => e.status !== 'draft'), weekStart, calendar, policy);
         if (ot.total > policy.maxWeeklyOvertime) {
           throw new HttpError(400, `This week has ${ot.total} h of overtime, above your organisation's weekly maximum of ${policy.maxWeeklyOvertime} h.`);

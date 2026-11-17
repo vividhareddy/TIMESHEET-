@@ -210,27 +210,6 @@ CREATE TABLE IF NOT EXISTS overtime_requests (
 CREATE UNIQUE INDEX IF NOT EXISTS overtime_timesheet_project_key ON overtime_requests (timesheet_id, project_id) WHERE source = 'timesheet';
 CREATE INDEX IF NOT EXISTS overtime_requests_employee_idx ON overtime_requests (employee_id, week_start);
 
--- Per-employee overtime eligibility: 'inherit' follows the policy's department rule; the others override it.
-ALTER TABLE employees ADD COLUMN IF NOT EXISTS overtime_eligibility varchar(12) NOT NULL DEFAULT 'inherit'
-  CHECK (overtime_eligibility IN ('inherit', 'eligible', 'not_eligible'));
-
--- Company overtime policy documents. Only 'approved' documents are shown to employees and used by the OT assistant;
--- editing an approved document returns it to 'draft' until it is approved again.
-CREATE TABLE IF NOT EXISTS policy_documents (
-  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  organisation_id  uuid NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
-  title            varchar(150) NOT NULL,
-  content          text NOT NULL,
-  status           varchar(10) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'archived')),
-  created_by       uuid NULL REFERENCES employees(id) ON DELETE SET NULL,
-  updated_by       uuid NULL REFERENCES employees(id) ON DELETE SET NULL,
-  approved_by      uuid NULL REFERENCES employees(id) ON DELETE SET NULL,
-  approved_at      timestamptz NULL,
-  created_at       timestamptz NOT NULL DEFAULT now(),
-  updated_at       timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS policy_documents_org_idx ON policy_documents (organisation_id, status);
-
 -- Signed-out JWTs (by token id) until they would have expired anyway.
 CREATE TABLE IF NOT EXISTS revoked_tokens (
   jti         uuid PRIMARY KEY,
