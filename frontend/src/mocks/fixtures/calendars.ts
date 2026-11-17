@@ -79,6 +79,8 @@ export const seedOvertimePolicy: OvertimePolicy = {
   requirePreApproval: false,
   approver: 'project_manager',
   autoFlag: true,
+  eligibilityScope: 'all',
+  eligibleDepartments: [],
 };
 
 export const seedSettings: AppSettings = {

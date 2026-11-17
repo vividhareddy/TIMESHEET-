@@ -1,4 +1,4 @@
-import type { OvertimePolicy, OvertimeRequest } from '@/types';
+import type { OvertimeEligibilityStatus, OvertimePolicy, OvertimeRequest } from '@/types';
 import type { OvertimeCreateRequest, RequestReviewBody } from '@/types/api';
 import { apiClient, unwrap } from './api';
 
@@ -9,6 +9,8 @@ export const overtimeService = {
   request: (body: OvertimeCreateRequest) => unwrap(apiClient.post<OvertimeRequest>('/overtime-requests', body)),
   /** POST /overtime-requests/:id/review */
   review: (id: string, body: RequestReviewBody) => unwrap(apiClient.post<OvertimeRequest>(`/overtime-requests/${id}/review`, body)),
+  /** GET /overtime-requests/eligibility — the signed-in employee's eligibility and the reason. */
+  eligibility: () => unwrap(apiClient.get<OvertimeEligibilityStatus>('/overtime-requests/eligibility')),
   /** GET /policies/overtime */
   getPolicy: () => unwrap(apiClient.get<OvertimePolicy>('/policies/overtime')),
   /** PUT /policies/overtime */

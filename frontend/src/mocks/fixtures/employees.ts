@@ -1,7 +1,7 @@
 /** DEVELOPMENT ONLY — fictitious sample employees for the mock API. */
 import type { Employee } from '@/types';
 
-const base = { weeklyCapacity: 40, status: 'active' as const };
+const base = { weeklyCapacity: 40, status: 'active' as const, overtimeEligibility: 'inherit' as const };
 
 export const seedEmployees: Employee[] = [
   { ...base, id: 'emp-01', employeeCode: 'EMP1001', name: 'Priya Sharma', email: 'priya.sharma@northwind-tech.com', phone: '+91 98450 11201', department: 'Operations', designation: 'Resource Management Lead', workLocation: 'Hyderabad', country: 'IN', calendarId: 'cal-in', managerId: null, systemRole: 'admin', joinDate: '2019-04-15' },

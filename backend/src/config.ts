@@ -26,6 +26,11 @@ export const config = {
     /** Lifetime when the user ticks "Remember me". */
     rememberExpiresIn: process.env.JWT_REMEMBER_EXPIRES_IN || '7d',
   },
+  /** OT policy assistant (optional): disabled until ANTHROPIC_API_KEY is set. */
+  otAssistant: {
+    enabled: Boolean(process.env.ANTHROPIC_API_KEY),
+    model: process.env.OT_ASSISTANT_MODEL || 'claude-opus-5-5',
+  },
   db: {
     host: process.env.PGHOST!,
     port: Number(process.env.PGPORT),

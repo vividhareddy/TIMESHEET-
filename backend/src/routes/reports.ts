@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { pool } from '../db.js';
 import { currentUser, requireAuth, requireRole } from '../auth.js';
 import { HttpError, isISODate, isUuid, str } from '../http.js';
-import { OVERTIME_COLUMNS, fetchTimesheets, loadAllocations, loadApprovedLeaves, loadCalendars, loadEmployees, toOvertime, type OvertimeRow, type Timesheet } from '../data.js';
+import { LEAVE_COLUMNS, toLeave, type LeaveRow, OVERTIME_COLUMNS, fetchTimesheets, loadAllocations, loadApprovedLeaves, loadCalendars, loadEmployees, toOvertime, type OvertimeRow, type Timesheet } from '../data.js';
 import { managedProjectIds, teamEmployeeIds } from '../scope.js';
 import { readPolicy } from './organisation.js';
 import { addDays, currentWeekStart, startOfWeek, sum, todayISO } from '../lib/dates.js';
@@ -226,7 +226,143 @@ reportsRouter.get('/hours', requireRole('admin', 'manager'), async (req, res) =>
     otMap.set(o.employeeId, row);
   }
 
+  const projectName = (id: string) => projectById.get(id)?.name ?? '—';
+
+  // Overtime by project, and the individual records behind both summaries.
+  const otProjects = new Map<string, { projectId: string; name: string; color: string; employees: Set<string>; approved: number; pending: number; rejected: number; payable: number }>();
+  for (const o of ot) {
+    const p = projectById.get(o.projectId);
+    const row = otProjects.get(o.projectId) ?? { projectId: o.projectId, name: p?.name ?? '—', color: p?.color ?? '', employees: new Set<string>(), approved: 0, pending: 0, rejected: 0, payable: 0 };
+    row.employees.add(o.employeeId);
+    row[o.status] = sum([row[o.status], o.hours]);
+    if (o.status === 'approved') row.payable = sum([row.payable, o.hours * policy.weekdayMultiplier]);
+    otProjects.set(o.projectId, row);
+  }
+  const overtimeByProject = [...otProjects.values()]
+    .map(({ employees: people, ...r }) => ({ ...r, employees: people.size }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const overtimeRecords = ot
+    .map((o) => ({
+      id: o.id,
+      employeeName: nameOf(o.employeeId),
+      projectName: projectName(o.projectId),
+      weekStart: o.weekStart,
+      date: o.date ?? null,
+      hours: o.hours,
+      source: o.source,
+      status: o.status,
+      reason: o.reason,
+    }))
+    .sort((a, b) => b.weekStart.localeCompare(a.weekStart) || a.employeeName.localeCompare(b.employeeName));
+
+  // Timesheet status: one row per employee and week for everyone allocated to a project in scope.
+  // Statuses consider only the entries on in-scope projects (drafts included).
+  const tsByKey = new Map(timesheets.filter((t) => weekSet.has(t.weekStart)).map((t) => [`${t.employeeId}|${t.weekStart}`, t]));
+  const timesheetRows: Array<{ employeeId: string; name: string; weekStart: string; status: string; hours: number; submittedAt: string | null }> = [];
+  for (const w of weeks) {
+    const people = new Set(scopedAllocs.filter((a) => overlapsWeek(a, w)).map((a) => a.employeeId));
+    // Anyone who logged time on an in-scope project that week is included even without an allocation.
+    for (const t of timesheets) if (t.weekStart === w && t.entries.some((e) => scope.has(e.projectId))) people.add(t.employeeId);
+    for (const id of people) {
+      const emp = employees.get(id);
+      if (!emp) continue;
+      const ts = tsByKey.get(`${id}|${w}`);
+      const scoped = ts ? { ...ts, entries: ts.entries.filter((e) => scope.has(e.projectId)) } : undefined;
+      timesheetRows.push({
+        employeeId: id,
+        name: emp.name,
+        weekStart: w,
+        status: deriveTimesheetStatus(scoped),
+        hours: scoped ? sum(scoped.entries.map(entryTotal)) : 0,
+        submittedAt: scoped?.entries.some((e) => e.status !== 'draft') ? (ts?.submittedAt ?? null) : null,
+      });
+    }
+  }
+  timesheetRows.sort((a, b) => b.weekStart.localeCompare(a.weekStart) || a.name.localeCompare(b.name));
+  const timesheetCounts: Record<string, number> = {};
+  for (const r of timesheetRows) timesheetCounts[r.status] = (timesheetCounts[r.status] ?? 0) + 1;
+
+  // Compliance: weekly submission completion and what is still waiting for approval.
+  const NOT_SUBMITTED = new Set(['not_started', 'draft']);
+  const complianceWeeks = weeks.map((w) => {
+    const rows = timesheetRows.filter((r) => r.weekStart === w);
+    const submitted = rows.filter((r) => !NOT_SUBMITTED.has(r.status)).length;
+    const pendingFacts = facts.filter((f) => f.t.weekStart === w && f.e.status === 'pending');
+    return {
+      weekStart: w,
+      expected: rows.length,
+      submitted,
+      notSubmitted: rows.length - submitted,
+      completion: rows.length ? Math.round((submitted / rows.length) * 100) : 100,
+      pendingEntries: pendingFacts.length,
+      pendingHours: hoursOf(pendingFacts),
+    };
+  });
+  const missingSubmissions = timesheetRows
+    .filter((r) => NOT_SUBMITTED.has(r.status))
+    .map((r) => ({ weekStart: r.weekStart, employeeId: r.employeeId, name: r.name, status: r.status }));
+  const today = todayISO();
+  const pendingApprovals = facts
+    .filter((f) => f.e.status === 'pending')
+    .map((f) => {
+      const p = projectById.get(f.e.projectId);
+      const since = f.t.submittedAt?.slice(0, 10) ?? f.t.updatedAt.slice(0, 10);
+      return {
+        employeeName: nameOf(f.t.employeeId),
+        projectName: p?.name ?? '—',
+        approverName: p ? nameOf(p.manager_id) : '—',
+        weekStart: f.t.weekStart,
+        hours: f.hours,
+        submittedOn: since,
+        daysWaiting: Math.max(0, Math.round((Date.parse(today) - Date.parse(since)) / 86_400_000)),
+      };
+    })
+    .sort((a, b) => b.daysWaiting - a.daysWaiting);
+
+  // Leave: requests whose date falls in the period. Admins without a project filter see everyone;
+  // otherwise people allocated to in-scope projects (plus a manager's own team).
+  let leaveScope: Set<string> | 'all' = 'all';
+  if (projectId || user.systemRole !== 'admin') {
+    leaveScope = new Set(scopedAllocs.filter((a) => weeks.some((w) => overlapsWeek(a, w))).map((a) => a.employeeId));
+    if (user.systemRole === 'manager' && !projectId) for (const id of await teamEmployeeIds(pool, user)) leaveScope.add(id);
+  }
+  const { rows: leaveRows } = await pool.query<LeaveRow>(
+    `SELECT ${LEAVE_COLUMNS} FROM leave_requests WHERE organisation_id = $1 AND status <> 'withdrawn' AND date BETWEEN $2 AND $3 ORDER BY date DESC`,
+    [org, from, lastDay],
+  );
+  const leaveRequests = leaveRows.map(toLeave).filter((l) => leaveScope === 'all' || leaveScope.has(l.employeeId));
+  const leaveDays = (d: 'full' | 'half') => (d === 'full' ? 1 : 0.5);
+  const leaveMap = new Map<string, { employeeId: string; name: string; requests: number; approvedDays: number; pendingDays: number; rejectedDays: number; approvedHours: number }>();
+  for (const l of leaveRequests) {
+    const row = leaveMap.get(l.employeeId) ?? { employeeId: l.employeeId, name: nameOf(l.employeeId), requests: 0, approvedDays: 0, pendingDays: 0, rejectedDays: 0, approvedHours: 0 };
+    row.requests += 1;
+    if (l.status === 'approved') {
+      row.approvedDays = sum([row.approvedDays, leaveDays(l.duration)]);
+      row.approvedHours = sum([row.approvedHours, l.hours]);
+    } else if (l.status === 'pending') row.pendingDays = sum([row.pendingDays, leaveDays(l.duration)]);
+    else if (l.status === 'rejected') row.rejectedDays = sum([row.rejectedDays, leaveDays(l.duration)]);
+    leaveMap.set(l.employeeId, row);
+  }
+  const leaveRecords = leaveRequests.map((l) => ({
+    id: l.id,
+    employeeName: nameOf(l.employeeId),
+    date: l.date,
+    duration: l.duration,
+    hours: l.hours,
+    status: l.status,
+    reason: l.reason,
+    reviewerName: l.reviewerId ? nameOf(l.reviewerId) : null,
+    reviewerComment: l.reviewerComment ?? null,
+  }));
+
   res.json({
+    from,
+    to: lastDay,
+    timesheetStatus: { counts: timesheetCounts, rows: timesheetRows },
+    compliance: { weeks: complianceWeeks, missing: missingSubmissions, pendingApprovals },
+    overtimeByProject,
+    overtimeRecords,
+    leave: { employees: [...leaveMap.values()].sort((a, b) => a.name.localeCompare(b.name)), records: leaveRecords },
     weeks,
     totals: {
       actual: hoursOf(facts),

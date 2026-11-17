@@ -1,5 +1,8 @@
 import { useState } from 'react';
-import { CheckCircle2, Hourglass, Send, Timer, Info } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { CheckCircle2, Hourglass, MessageCircleQuestion, Send, Timer, Info } from 'lucide-react';
+import { useApiQuery } from '@/hooks/useApiQuery';
+import { overtimeService } from '@/services';
 import { useAppData } from '@/context/AppDataContext';
 import { useCurrentUser, useLookups } from '@/hooks/useLookups';
 import { useAsyncAction } from '@/hooks/useAsyncAction';
@@ -27,6 +30,9 @@ export function MyOvertimePage() {
   const [touched, setTouched] = useState(false);
   const cal = calendarOf(user);
   const holiday = findHoliday(cal, date);
+  // Re-check when the policy changes (eligibility is decided by the server).
+  const eligibility = useApiQuery(() => overtimeService.eligibility(), [policy]);
+  const ineligible = eligibility.data?.eligible === false;
 
   const errors = {
     project: !allocs.some((a) => a.projectId === projectId) ? 'Select a project you are allocated to in that week.' : undefined,
@@ -49,7 +55,18 @@ export function MyOvertimePage() {
 
   return (
     <div>
-      <PageHeader title="Overtime" description="Additional hours flagged from your timesheets, and pre-approval requests for planned extra work." />
+      <PageHeader
+        title="Overtime"
+        description="Additional hours flagged from your timesheets, and pre-approval requests for planned extra work."
+        actions={<Link to="/associate/ot-assistant"><Button variant="secondary" icon={MessageCircleQuestion}>Ask the OT assistant</Button></Link>}
+      />
+
+      {eligibility.data && (
+        <Alert tone={eligibility.data.eligible ? 'success' : 'warning'} className="mb-5" title={eligibility.data.eligible ? 'You are eligible for overtime' : 'You are not eligible for overtime'}>
+          {eligibility.data.reason}
+          {!eligibility.data.eligible && ' Extra hours you record are treated as ordinary hours. Contact your administrator if this seems wrong.'}
+        </Alert>
+      )}
 
       <div className="mb-5 grid grid-cols-2 gap-4 xl:grid-cols-4">
         <StatCard label="Total records" value={mine.length} icon={Timer} />
@@ -90,7 +107,7 @@ export function MyOvertimePage() {
             ) : (
               <Alert tone="info">Hours above {formatHours(policy.dailyThreshold)}/day{policy.weekendApplicable ? ' and weekend hours' : ''} are also flagged automatically when you submit your timesheet.</Alert>
             )}
-            <Button icon={Send} className="w-full" loading={busy} onClick={submit}>Submit request</Button>
+            <Button icon={Send} className="w-full" loading={busy} onClick={submit} disabled={ineligible || !policy.enabled}>Submit request</Button>
           </CardBody>
         </Card>
 

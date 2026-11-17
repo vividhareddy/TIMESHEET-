@@ -6,6 +6,7 @@ import { sum } from '@/utils/format';
 import { allocationsForWeek, computeOvertime, entryTotal, expectedWeekHours, isEntryLocked, isWorkingDay, leaveHours, timesheetTotal } from '@/utils/timesheet';
 import { badRequest, conflict, forbidden, newId, notFound, required, route } from '../http';
 import { calendarOf, canSee, db, managedProjectIds, visibleEmployeeIds } from './scope';
+import { overtimeEligibility } from '@/utils/overtime';
 
 const nowIso = () => new Date().toISOString();
 
@@ -26,6 +27,7 @@ function syncOvertime(ts: Timesheet): void {
   const { policy } = db();
   if (!policy.enabled || !policy.autoFlag) return;
   const emp = employeeOf(ts.employeeId);
+  if (!overtimeEligibility(emp, policy).eligible) return;
   const breakdown = computeOvertime(ts.entries.filter((e) => e.status !== 'draft'), ts.weekStart, calendarOf(emp), policy);
   for (const [projectId, hours] of Object.entries(breakdown.byProject)) {
     const existing = db().overtime.find((o) => o.timesheetId === ts.id && o.projectId === projectId && o.source === 'timesheet');
@@ -325,6 +327,7 @@ export const workflowRoutes = [
   }),
 
   // ----------------------------------------------------------------- overtime
+  route('GET', '/overtime-requests/eligibility', (req) => overtimeEligibility(req.user!, db().policy)),
   route('GET', '/overtime-requests', (req) => {
     const user = req.user!;
     if (user.systemRole === 'admin') return db().overtime;
@@ -338,6 +341,8 @@ export const workflowRoutes = [
   route('POST', '/overtime-requests', (req) => {
     const body = req.body as OvertimeCreateRequest;
     required(body as unknown as Record<string, unknown>, { projectId: 'Project', date: 'Date', reason: 'Business reason' });
+    const eligibility = overtimeEligibility(req.user!, db().policy);
+    if (!eligibility.eligible) throw forbidden(`You are not eligible for overtime. ${eligibility.reason}`);
     const weekStart = startOfWeek(body.date);
     if (!allocationsForWeek(db().allocations, req.user!.id, weekStart).some((a) => a.projectId === body.projectId)) {
       throw badRequest('You are not allocated to this project in that week.', { projectId: 'Select a project you are allocated to.' });

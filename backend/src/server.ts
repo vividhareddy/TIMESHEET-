@@ -14,12 +14,16 @@ import { employeesRouter } from './routes/employees.js';
 import { organisationRouter } from './routes/organisation.js';
 import { calendarsRouter } from './routes/calendars.js';
 import { projectsRouter } from './routes/projects.js';
+import { policyDocumentsRouter } from './routes/policyDocuments.js';
+import { otAssistantRouter } from './routes/otAssistant.js';
 
 const PORT = config.port;
 const CORS_ORIGIN = config.corsOrigin;
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN }));
+// Policy documents can be long; every other route keeps the small default limit.
+app.use('/api/policy-documents', express.json({ limit: '1mb' }));
 app.use(express.json({ limit: '100kb' }));
 
 /** Liveness check — does not touch the database. */
@@ -51,6 +55,8 @@ app.use('/api/approvals', approvalsRouter);
 app.use('/api/leave-requests', leaveRouter);
 app.use('/api/overtime-requests', overtimeRouter);
 app.use('/api/reports', reportsRouter);
+app.use('/api/policy-documents', policyDocumentsRouter);
+app.use('/api/ot-assistant', otAssistantRouter);
 
 app.use('/api', (_req: Request, res: Response) => {
   res.status(404).json({ message: 'Not found' });

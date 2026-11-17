@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Employee, EmployeeStatus, Role } from '@/types';
+import type { Employee, EmployeeStatus, OvertimeEligibility, Role } from '@/types';
 import type { EmployeeInput } from '@/types/api';
 import { Modal } from '@/components/common/Modal';
 import { Button } from '@/components/common/Button';
@@ -37,9 +37,16 @@ function blankInput(defaultWeeklyTarget: number): EmployeeInput {
     status: 'active',
     weeklyCapacity: defaultWeeklyTarget,
     joinDate: todayISO(),
+    overtimeEligibility: 'inherit',
     password: '',
   };
 }
+
+const ELIGIBILITY_OPTIONS: Array<{ value: OvertimeEligibility; label: string }> = [
+  { value: 'inherit', label: 'Follow overtime policy (by department)' },
+  { value: 'eligible', label: 'Always eligible' },
+  { value: 'not_eligible', label: 'Not eligible' },
+];
 
 /** Create / edit an employee. Duplicate IDs and emails are validated by the API (409 + field errors). */
 export function EmployeeFormModal({ open, employee, onClose }: Props) {
@@ -58,7 +65,7 @@ export function EmployeeFormModal({ open, employee, onClose }: Props) {
     if (employee) {
       const { id: _id, ...input } = employee;
       void _id;
-      setForm({ ...input, password: '' });
+      setForm({ ...input, overtimeEligibility: input.overtimeEligibility ?? 'inherit', password: '' });
     } else setForm(blankInput(settings.defaultWeeklyTarget));
     setErrors({});
     setFormError(null);
@@ -171,6 +178,11 @@ export function EmployeeFormModal({ open, employee, onClose }: Props) {
         <Field label="Status" error={errors.status}>
           <Select value={form.status} onChange={(e) => set('status', e.target.value as EmployeeStatus)} disabled={isSelf}>
             {ref.employeeStatuses.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+          </Select>
+        </Field>
+        <Field label="Overtime eligibility" error={errors.overtimeEligibility} hint="Overrides the department rule in Overtime & Policies when not set to follow the policy.">
+          <Select value={form.overtimeEligibility} onChange={(e) => set('overtimeEligibility', e.target.value as OvertimeEligibility)}>
+            {ELIGIBILITY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </Select>
         </Field>
         <Field

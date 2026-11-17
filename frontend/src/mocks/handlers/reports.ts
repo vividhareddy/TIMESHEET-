@@ -6,9 +6,15 @@ import type {
   AssociateDashboardSummary,
   EmployeeHoursRow,
   HoursReport,
+  LeaveRecordRow,
+  LeaveSummaryRow,
   ManagerDashboardSummary,
+  OvertimeProjectRow,
+  OvertimeRecordRow,
   OvertimeSummaryRow,
   ProjectHoursRow,
+  ReportTimesheetStatus,
+  TimesheetStatusRow,
 } from '@/types/api';
 import { addDays, currentWeekStart, startOfWeek, todayISO } from '@/utils/date';
 import { sum } from '@/utils/format';
@@ -167,7 +173,89 @@ export const reportRoutes = [
       otMap.set(o.employeeId, row);
     }
 
+    // ---- same additions as backend/src/routes/reports.ts
+    const nameOf = (id: string) => d.employees.find((e) => e.id === id)?.name ?? '—';
+    const projectOf = (id: string) => d.projects.find((p) => p.id === id);
+    const lastDay = addDays(weeks[weeks.length - 1]!, 6);
+
+    const otProjects = new Map<string, OvertimeProjectRow & { people: Set<string> }>();
+    for (const o of ot) {
+      const p = projectOf(o.projectId);
+      const row = otProjects.get(o.projectId) ?? { projectId: o.projectId, name: p?.name ?? '—', color: p?.color ?? '', employees: 0, approved: 0, pending: 0, rejected: 0, payable: 0, people: new Set<string>() };
+      row.people.add(o.employeeId);
+      row.employees = row.people.size;
+      row[o.status] += o.hours;
+      if (o.status === 'approved') row.payable += o.hours * d.policy.weekdayMultiplier;
+      otProjects.set(o.projectId, row);
+    }
+    const overtimeByProject: OvertimeProjectRow[] = [...otProjects.values()].map(({ people: _people, ...r }) => r);
+    const overtimeRecords: OvertimeRecordRow[] = ot.map((o) => ({
+      id: o.id, employeeName: nameOf(o.employeeId), projectName: projectOf(o.projectId)?.name ?? '—', weekStart: o.weekStart,
+      date: o.date ?? null, hours: o.hours, source: o.source, status: o.status, reason: o.reason,
+    }));
+
+    const tsRows: TimesheetStatusRow[] = [];
+    for (const w of weeks) {
+      const people = new Set(scopedAllocs.filter((a) => overlapsWeek(a, w)).map((a) => a.employeeId));
+      for (const t of d.timesheets) if (t.weekStart === w && t.entries.some((e) => scope.has(e.projectId))) people.add(t.employeeId);
+      for (const id of people) {
+        if (!d.employees.some((e) => e.id === id)) continue;
+        const ts = d.timesheets.find((t) => t.employeeId === id && t.weekStart === w);
+        const scoped = ts ? { ...ts, entries: ts.entries.filter((e) => scope.has(e.projectId)) } : undefined;
+        tsRows.push({
+          employeeId: id, name: nameOf(id), weekStart: w,
+          status: deriveTimesheetStatus(scoped) as ReportTimesheetStatus,
+          hours: scoped ? sum(scoped.entries.map(entryTotal)) : 0,
+          submittedAt: scoped?.entries.some((e) => e.status !== 'draft') ? (ts?.submittedAt ?? null) : null,
+        });
+      }
+    }
+    tsRows.sort((a, b) => b.weekStart.localeCompare(a.weekStart) || a.name.localeCompare(b.name));
+    const tsCounts: Partial<Record<ReportTimesheetStatus, number>> = {};
+    tsRows.forEach((r) => (tsCounts[r.status] = (tsCounts[r.status] ?? 0) + 1));
+
+    const notSubmitted = (s: string) => s === 'not_started' || s === 'draft';
+    const complianceWeeks = weeks.map((w) => {
+      const rows = tsRows.filter((r) => r.weekStart === w);
+      const submitted = rows.filter((r) => !notSubmitted(r.status)).length;
+      const pend = facts.filter((f) => f.t.weekStart === w && f.e.status === 'pending');
+      return { weekStart: w, expected: rows.length, submitted, notSubmitted: rows.length - submitted, completion: rows.length ? Math.round((submitted / rows.length) * 100) : 100, pendingEntries: pend.length, pendingHours: sum(pend.map((f) => f.hours)) };
+    });
+    const today = todayISO();
+    const pendingApprovals = facts.filter((f) => f.e.status === 'pending').map((f) => {
+      const p = projectOf(f.e.projectId);
+      const since = (f.t.submittedAt ?? f.t.updatedAt ?? today).slice(0, 10);
+      return { employeeName: nameOf(f.t.employeeId), projectName: p?.name ?? '—', approverName: p ? nameOf(p.managerId) : '—', weekStart: f.t.weekStart, hours: f.hours, submittedOn: since, daysWaiting: Math.max(0, Math.round((Date.parse(today) - Date.parse(since)) / 86_400_000)) };
+    });
+
+    let leaveScope: Set<string> | null = null;
+    if (req.query.projectId || user.systemRole !== 'admin') {
+      leaveScope = new Set(scopedAllocs.filter((a) => weeks.some((w) => overlapsWeek(a, w))).map((a) => a.employeeId));
+      if (user.systemRole === 'manager' && !req.query.projectId) teamEmployeeIds(user).forEach((id) => leaveScope!.add(id));
+    }
+    const leaveList = d.leaves.filter((l) => l.date >= from && l.date <= lastDay && (!leaveScope || leaveScope.has(l.employeeId)));
+    const leaveMap = new Map<string, LeaveSummaryRow>();
+    for (const l of leaveList) {
+      const row = leaveMap.get(l.employeeId) ?? { employeeId: l.employeeId, name: nameOf(l.employeeId), requests: 0, approvedDays: 0, pendingDays: 0, rejectedDays: 0, approvedHours: 0 };
+      const days = l.duration === 'full' ? 1 : 0.5;
+      row.requests += 1;
+      if (l.status === 'approved') { row.approvedDays += days; row.approvedHours += l.hours; }
+      else if (l.status === 'pending') row.pendingDays += days;
+      else if (l.status === 'rejected') row.rejectedDays += days;
+      leaveMap.set(l.employeeId, row);
+    }
+
     return {
+      from,
+      to: lastDay,
+      timesheetStatus: { counts: tsCounts, rows: tsRows },
+      compliance: { weeks: complianceWeeks, missing: tsRows.filter((r) => notSubmitted(r.status)).map((r) => ({ weekStart: r.weekStart, employeeId: r.employeeId, name: r.name, status: r.status })), pendingApprovals },
+      overtimeByProject,
+      overtimeRecords,
+      leave: {
+        employees: [...leaveMap.values()],
+        records: leaveList.map((l) => ({ id: l.id, employeeName: nameOf(l.employeeId), date: l.date, duration: l.duration, hours: l.hours, status: l.status as LeaveRecordRow['status'], reason: l.reason, reviewerName: l.reviewerId ? nameOf(l.reviewerId) : null, reviewerComment: l.reviewerComment ?? null })),
+      },
       weeks,
       totals: {
         actual: sum(facts.map((f) => f.hours)),

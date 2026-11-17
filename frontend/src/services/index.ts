@@ -16,4 +16,6 @@ export { leaveService } from './leaveService';
 export { overtimeService } from './overtimeService';
 export { reportService } from './reportService';
 export { lookupService } from './lookupService';
+export { policyDocumentService } from './policyDocumentService';
+export { otAssistantService } from './otAssistantService';
 export { mockControlService } from './mockControlService';

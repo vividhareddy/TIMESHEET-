@@ -6,6 +6,7 @@ import type {
   LeaveRequest,
   OvertimePolicy,
   OvertimeRequest,
+  PolicyDocument,
   Project,
   Timesheet,
   WorkCalendar,
@@ -28,4 +29,6 @@ export interface MockDatabase {
   workLocations: WorkLocation[];
   settings: AppSettings;
   policy: OvertimePolicy;
+  /** Optional so browsers holding a database saved before this field existed still load it. */
+  policyDocuments?: PolicyDocument[];
 }

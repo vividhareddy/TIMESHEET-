@@ -97,7 +97,7 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
 
 export function Tabs<T extends string>({ value, onChange, options }: SegmentedProps<T>) {
   return (
-    <div className="mb-5 flex gap-6 overflow-x-auto border-b border-slate-200" role="tablist">
+    <div className="mb-5 flex gap-6 overflow-x-auto overflow-y-hidden border-b border-slate-200" role="tablist">
       {options.map((o) => (
         <button
           key={o.value}

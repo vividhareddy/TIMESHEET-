@@ -35,6 +35,8 @@ export function defaultPolicy(): OvertimePolicy {
     requirePreApproval: false,
     approver: 'project_manager',
     autoFlag: true,
+    eligibilityScope: 'all',
+    eligibleDepartments: [],
   };
 }
 

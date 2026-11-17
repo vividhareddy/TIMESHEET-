@@ -6,6 +6,7 @@ import { currentUser, requireAuth, requireRole, type AuthUser } from '../auth.js
 import { EMAIL_RE, HttpError, assertId, assertValid, isISODate, isUuid, passwordProblem, str, uniqueViolation } from '../http.js';
 import { EMPLOYEE_COLUMNS, ROLES, toEmployee, type EmployeeRow, type Role } from '../models/employee.js';
 import { BCRYPT_ROUNDS } from './auth.js';
+import { OVERTIME_ELIGIBILITY, type OvertimeEligibility } from '../lib/overtimeEligibility.js';
 
 interface EmployeeInput {
   employeeCode: string;
@@ -22,6 +23,7 @@ interface EmployeeInput {
   status: 'active' | 'inactive';
   weeklyCapacity: number;
   joinDate: string;
+  overtimeEligibility: OvertimeEligibility;
   /** Required when creating; optional on update (resets the password). */
   password: string | null;
 }
@@ -45,6 +47,9 @@ async function validateEmployee(db: PoolClient, user: AuthUser, body: unknown, i
   const weeklyCapacity = Number(b.weeklyCapacity);
   const joinDate = str(b.joinDate);
   const password = typeof b.password === 'string' && b.password !== '' ? b.password : null;
+  // Optional for older clients: a missing value follows the policy.
+  const overtimeEligibility = (b.overtimeEligibility ?? 'inherit') as OvertimeEligibility;
+  if (!OVERTIME_ELIGIBILITY.includes(overtimeEligibility)) errors.overtimeEligibility = 'Select a valid overtime eligibility.';
 
   if (!employeeCode) errors.employeeCode = 'Employee ID is required.';
   else if (!/^[A-Z0-9][A-Z0-9_-]{0,19}$/.test(employeeCode)) errors.employeeCode = 'Use up to 20 letters, digits, "-" or "_".';
@@ -103,7 +108,7 @@ async function validateEmployee(db: PoolClient, user: AuthUser, body: unknown, i
 
   return {
     employeeCode, name, email, phone, department, designation, workLocation, country,
-    calendarId: resolvedCalendar, managerId, systemRole, status, weeklyCapacity, joinDate, password,
+    calendarId: resolvedCalendar, managerId, systemRole, status, weeklyCapacity, joinDate, overtimeEligibility, password,
   };
 }
 
@@ -170,11 +175,12 @@ employeesRouter.post('/', requireRole('admin'), async (req, res) => {
     const hash = await bcrypt.hash(input.password!, BCRYPT_ROUNDS);
     const { rows } = await db.query<EmployeeRow>(
       `INSERT INTO employees (organisation_id, employee_code, name, email, password_hash, phone, department, designation,
-         work_location, country, calendar_id, manager_id, system_role, status, weekly_capacity, join_date)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         work_location, country, calendar_id, manager_id, system_role, status, weekly_capacity, join_date, overtime_eligibility)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
        RETURNING ${EMPLOYEE_COLUMNS}`,
       [user.organisationId, input.employeeCode, input.name, input.email, hash, input.phone, input.department, input.designation,
-        input.workLocation, input.country, input.calendarId, input.managerId, input.systemRole, input.status, input.weeklyCapacity, input.joinDate],
+        input.workLocation, input.country, input.calendarId, input.managerId, input.systemRole, input.status, input.weeklyCapacity, input.joinDate,
+        input.overtimeEligibility],
     );
     return rows[0]!;
   });
@@ -204,11 +210,12 @@ employeesRouter.put('/:id', requireRole('admin'), async (req, res) => {
     const { rows } = await db.query<EmployeeRow>(
       `UPDATE employees SET employee_code = $3, name = $4, email = $5, phone = $6, department = $7, designation = $8,
          work_location = $9, country = $10, calendar_id = $11, manager_id = $12, system_role = $13, status = $14,
-         weekly_capacity = $15, join_date = $16, password_hash = COALESCE($17, password_hash), updated_at = now()
+         weekly_capacity = $15, join_date = $16, password_hash = COALESCE($17, password_hash), overtime_eligibility = $18, updated_at = now()
        WHERE organisation_id = $1 AND id = $2
        RETURNING ${EMPLOYEE_COLUMNS}`,
       [user.organisationId, id, input.employeeCode, input.name, input.email, input.phone, input.department, input.designation,
-        input.workLocation, input.country, input.calendarId, input.managerId, input.systemRole, input.status, input.weeklyCapacity, input.joinDate, hash],
+        input.workLocation, input.country, input.calendarId, input.managerId, input.systemRole, input.status, input.weeklyCapacity, input.joinDate, hash,
+        input.overtimeEligibility],
     );
     return rows[0]!;
   });
