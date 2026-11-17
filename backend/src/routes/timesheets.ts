@@ -96,6 +96,10 @@ async function saveOwnTimesheet(user: AuthUser, body: unknown, submit: boolean):
   if (!isISODate(b.weekStart)) throw new HttpError(400, 'Week is required.', { weekStart: 'Week is required.' });
   if (b.entries !== undefined && !Array.isArray(b.entries)) throw new HttpError(400, 'Entries must be a list.');
   const weekStart = startOfWeek(b.weekStart);
+  const minWeek = addDays(currentWeekStart(), -14);
+  if (weekStart < minWeek || weekStart > currentWeekStart()) {
+    throw new HttpError(400, 'Timesheets can only be saved for the current week or the two weeks before it.');
+  }
   const weekEnd = addDays(weekStart, 6);
   const dates = weekDates(weekStart);
   const org = user.organisationId;
@@ -157,7 +161,6 @@ async function saveOwnTimesheet(user: AuthUser, body: unknown, submit: boolean):
 
       const wasSubmitted = existing.entries.some((e) => e.status !== 'draft');
       if (submit) {
-        if (weekStart > currentWeekStart()) throw new HttpError(400, 'Future weeks can only be saved as a draft.');
         const editable = entries.filter((e) => !isEntryLocked(e.status));
         if (!editable.length) throw new HttpError(409, 'All entries for this week are already submitted.');
         if (sum(editable.map(entryTotal)) <= 0) throw new HttpError(400, 'Enter your project hours before submitting.');
