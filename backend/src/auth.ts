@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { config } from './config.js';
-import { pool } from './db.js';
 import { HttpError } from './http.js';
-import { EMPLOYEE_COLUMNS, toEmployee, type Employee, type EmployeeRow, type Role } from './models/employee.js';
+import { EMPLOYEE_PUBLIC_FIELDS, EmployeeModel, employeeFromDoc, type Employee, type EmployeeLean, type Role } from './models/employee.js';
+import { RevokedToken } from './models/requests.js';
 
 const ISSUER = 'timesheet-api';
 
@@ -43,7 +43,9 @@ function bearerToken(req: Request): string | null {
 
 function verify(token: string): TokenClaims {
   try {
-    return jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'], issuer: ISSUER }) as TokenClaims;
+    const claims = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'], issuer: ISSUER }) as Partial<TokenClaims>;
+    if (typeof claims.sub !== 'string' || typeof claims.jti !== 'string' || typeof claims.exp !== 'number') throw new Error('Incomplete token.');
+    return claims as TokenClaims;
   } catch (err) {
     if (err instanceof jwt.TokenExpiredError) throw new HttpError(401, 'Your session has expired. Please sign in again.');
     throw new HttpError(401, 'Your session is not valid. Please sign in again.');
@@ -56,17 +58,14 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   if (!token) throw new HttpError(401, 'Please sign in to continue.');
   const claims = verify(token);
 
-  const { rows } = await pool.query<EmployeeRow & { organisation_id: string; revoked: boolean }>(
-    `SELECT ${EMPLOYEE_COLUMNS}, organisation_id,
-            EXISTS (SELECT 1 FROM revoked_tokens WHERE jti = $2) AS revoked
-       FROM employees WHERE id = $1`,
-    [claims.sub, claims.jti],
-  );
-  const row = rows[0];
-  if (!row || row.revoked) throw new HttpError(401, 'Your session has ended. Please sign in again.');
-  if (row.status !== 'active') throw new HttpError(403, 'Your account is inactive. Contact your administrator.');
+  const [employee, revoked] = await Promise.all([
+    EmployeeModel.findById(claims.sub).select(EMPLOYEE_PUBLIC_FIELDS).lean<EmployeeLean>(),
+    RevokedToken.exists({ _id: claims.jti }),
+  ]);
+  if (!employee || revoked) throw new HttpError(401, 'Your session has ended. Please sign in again.');
+  if (employee.status !== 'active') throw new HttpError(403, 'Your account is inactive. Contact your administrator.');
 
-  res.locals.user = { ...toEmployee(row), organisationId: row.organisation_id } satisfies AuthUser;
+  res.locals.user = { ...employeeFromDoc(employee), organisationId: employee.organisationId } satisfies AuthUser;
   res.locals.token = claims;
   next();
 }
@@ -83,7 +82,10 @@ export function requireRole(...roles: Role[]) {
 
 export const currentUser = (res: Response): AuthUser => res.locals.user as AuthUser;
 
-/** Revokes the request's token (logout). Invalid or expired tokens are simply ignored. */
+/**
+ * Revokes the request's token (logout). Invalid or expired tokens are simply ignored.
+ * A TTL index removes each revoked token once it would have expired anyway.
+ */
 export async function revokeToken(req: Request): Promise<void> {
   const token = bearerToken(req);
   if (!token) return;
@@ -93,9 +95,5 @@ export async function revokeToken(req: Request): Promise<void> {
   } catch {
     return;
   }
-  await pool.query(
-    `INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, to_timestamp($2)) ON CONFLICT (jti) DO NOTHING`,
-    [claims.jti, claims.exp],
-  );
-  await pool.query('DELETE FROM revoked_tokens WHERE expires_at < now()');
+  await RevokedToken.updateOne({ _id: claims.jti }, { $setOnInsert: { expiresAt: new Date(claims.exp * 1000) } }, { upsert: true });
 }

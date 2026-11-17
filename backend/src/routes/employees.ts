@@ -1,10 +1,14 @@
 import { Router } from 'express';
 import bcrypt from 'bcrypt';
-import type { PoolClient } from 'pg';
-import { pool } from '../db.js';
+import type { ClientSession } from 'mongoose';
+import { withTransaction } from '../mongo.js';
 import { currentUser, requireAuth, requireRole, type AuthUser } from '../auth.js';
 import { EMAIL_RE, HttpError, assertId, assertValid, isISODate, isUuid, passwordProblem, str, uniqueViolation } from '../http.js';
-import { EMPLOYEE_COLUMNS, ROLES, toEmployee, type EmployeeRow, type Role } from '../models/employee.js';
+import { lockDoc } from '../data.js';
+import type { Country } from '../models/common.js';
+import { EMPLOYEE_PUBLIC_FIELDS, EmployeeModel, ROLES, employeeFromDoc, type EmployeeLean, type Role } from '../models/employee.js';
+import { Department, WorkLocation } from '../models/organisation.js';
+import { Calendar } from '../models/calendar.js';
 import { BCRYPT_ROUNDS } from './auth.js';
 
 interface EmployeeInput {
@@ -15,7 +19,7 @@ interface EmployeeInput {
   department: string;
   designation: string;
   workLocation: string;
-  country: string;
+  country: Country;
   calendarId: string | null;
   managerId: string | null;
   systemRole: Role;
@@ -27,7 +31,7 @@ interface EmployeeInput {
 }
 
 /** Validates the body and resolves location → country / default calendar. Mirrors the mock API rules. */
-async function validateEmployee(db: PoolClient, user: AuthUser, body: unknown, id: string | null): Promise<EmployeeInput> {
+async function validateEmployee(session: ClientSession, user: AuthUser, body: unknown, id: string | null): Promise<EmployeeInput> {
   const b = (body ?? {}) as Record<string, unknown>;
   const errors: Record<string, string> = {};
 
@@ -68,35 +72,30 @@ async function validateEmployee(db: PoolClient, user: AuthUser, body: unknown, i
 
   // Reference data must exist in this organisation.
   const org = user.organisationId;
-  let country = '';
+  let country: Country = 'US';
   let resolvedCalendar = calendarId;
-  if (department) {
-    const dep = await db.query('SELECT 1 FROM departments WHERE organisation_id = $1 AND name = $2', [org, department]);
-    if (!dep.rowCount) errors.department = 'Select a department from the list.';
+  if (department && !(await Department.exists({ organisationId: org, name: department }).session(session))) {
+    errors.department = 'Select a department from the list.';
   }
   if (workLocation) {
-    const loc = await db.query<{ country: string; default_calendar_id: string | null }>(
-      'SELECT country, default_calendar_id FROM work_locations WHERE organisation_id = $1 AND name = $2',
-      [org, workLocation],
-    );
-    const l = loc.rows[0];
+    const l = await WorkLocation.findOne({ organisationId: org, name: workLocation }).session(session).lean<{ country: string; defaultCalendarId?: string | null }>();
     if (!l) errors.workLocation = 'Select a work location from the list.';
     else {
-      country = l.country;
-      resolvedCalendar = calendarId ?? l.default_calendar_id;
+      country = l.country as Country;
+      resolvedCalendar = calendarId ?? l.defaultCalendarId ?? null;
     }
   }
   if (calendarId) {
-    const cal = isUuid(calendarId) ? await db.query('SELECT 1 FROM calendars WHERE organisation_id = $1 AND id = $2', [org, calendarId]) : null;
-    if (!cal?.rowCount) errors.calendarId = 'Unknown calendar.';
+    const cal = isUuid(calendarId) ? await Calendar.exists({ organisationId: org, _id: calendarId }).session(session) : null;
+    if (!cal) errors.calendarId = 'Unknown calendar.';
   }
   if (managerId) {
     if (managerId === id) errors.managerId = 'An employee cannot report to themselves.';
     else {
       const mgr = isUuid(managerId)
-        ? await db.query("SELECT 1 FROM employees WHERE organisation_id = $1 AND id = $2 AND status = 'active' AND system_role IN ('manager', 'admin')", [org, managerId])
+        ? await EmployeeModel.exists({ organisationId: org, _id: managerId, status: 'active', systemRole: { $in: ['manager', 'admin'] } }).session(session)
         : null;
-      if (!mgr?.rowCount) errors.managerId = 'Select an active manager or administrator.';
+      if (!mgr) errors.managerId = 'Select an active manager or administrator.';
     }
   }
   assertValid(errors);
@@ -108,34 +107,24 @@ async function validateEmployee(db: PoolClient, user: AuthUser, body: unknown, i
 }
 
 /** Prevents removing the organisation's last active administrator (which would lock everyone out of admin features). */
-async function assertAnotherActiveAdmin(db: PoolClient, orgId: string, excludingId: string): Promise<void> {
-  const { rows } = await db.query<{ n: number }>(
-    "SELECT count(*)::int AS n FROM employees WHERE organisation_id = $1 AND system_role = 'admin' AND status = 'active' AND id <> $2",
-    [orgId, excludingId],
-  );
-  if (!rows[0]?.n) throw new HttpError(409, 'The organisation must keep at least one active administrator.');
+async function assertAnotherActiveAdmin(session: ClientSession, orgId: string, excludingId: string): Promise<void> {
+  const n = await EmployeeModel.countDocuments({ organisationId: orgId, systemRole: 'admin', status: 'active', _id: { $ne: excludingId } }).session(session);
+  if (!n) throw new HttpError(409, 'The organisation must keep at least one active administrator.');
 }
 
 function duplicateError(err: unknown): HttpError | null {
-  const constraint = uniqueViolation(err);
-  if (constraint === 'employees_email_key') return new HttpError(409, 'An employee with these details already exists.', { email: 'This email address is already in use.' });
-  if (constraint === 'employees_employee_code_key') return new HttpError(409, 'An employee with these details already exists.', { employeeCode: 'This employee ID already exists.' });
+  const index = uniqueViolation(err);
+  if (index === 'employees_email_key') return new HttpError(409, 'An employee with these details already exists.', { email: 'This email address is already in use.' });
+  if (index === 'employees_employee_code_key') return new HttpError(409, 'An employee with these details already exists.', { employeeCode: 'This employee ID already exists.' });
   return null;
 }
 
-/** Runs fn in a transaction on a dedicated client. */
-async function inTransaction<T>(fn: (db: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
+/** Runs fn in a transaction, translating duplicate email / employee ID errors. */
+async function inTransaction<T>(fn: (session: ClientSession) => Promise<T>): Promise<T> {
   try {
-    await client.query('BEGIN');
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
+    return await withTransaction(fn);
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
     throw duplicateError(err) ?? err;
-  } finally {
-    client.release();
   }
 }
 
@@ -144,75 +133,56 @@ employeesRouter.use(requireAuth);
 
 /** GET /api/employees — the employee directory (needed to show names across the app). */
 employeesRouter.get('/', async (_req, res) => {
-  const { rows } = await pool.query<EmployeeRow>(
-    `SELECT ${EMPLOYEE_COLUMNS} FROM employees WHERE organisation_id = $1 ORDER BY name`,
-    [currentUser(res).organisationId],
-  );
-  res.json(rows.map(toEmployee));
+  const docs = await EmployeeModel.find({ organisationId: currentUser(res).organisationId }).select(EMPLOYEE_PUBLIC_FIELDS).sort({ name: 1 }).lean<EmployeeLean[]>();
+  res.json(docs.map(employeeFromDoc));
 });
 
 /** GET /api/employees/:id */
 employeesRouter.get('/:id', async (req, res) => {
   const id = assertId(req.params.id, 'Employee');
-  const { rows } = await pool.query<EmployeeRow>(
-    `SELECT ${EMPLOYEE_COLUMNS} FROM employees WHERE organisation_id = $1 AND id = $2`,
-    [currentUser(res).organisationId, id],
-  );
-  if (!rows[0]) throw new HttpError(404, 'Employee not found.');
-  res.json(toEmployee(rows[0]));
+  const doc = await EmployeeModel.findOne({ organisationId: currentUser(res).organisationId, _id: id }).select(EMPLOYEE_PUBLIC_FIELDS).lean<EmployeeLean>();
+  if (!doc) throw new HttpError(404, 'Employee not found.');
+  res.json(employeeFromDoc(doc));
 });
 
 /** POST /api/employees — admin creates an account (with a temporary password) and assigns its role. */
 employeesRouter.post('/', requireRole('admin'), async (req, res) => {
   const user = currentUser(res);
-  const saved = await inTransaction(async (db) => {
-    const input = await validateEmployee(db, user, req.body, null);
-    const hash = await bcrypt.hash(input.password!, BCRYPT_ROUNDS);
-    const { rows } = await db.query<EmployeeRow>(
-      `INSERT INTO employees (organisation_id, employee_code, name, email, password_hash, phone, department, designation,
-         work_location, country, calendar_id, manager_id, system_role, status, weekly_capacity, join_date)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-       RETURNING ${EMPLOYEE_COLUMNS}`,
-      [user.organisationId, input.employeeCode, input.name, input.email, hash, input.phone, input.department, input.designation,
-        input.workLocation, input.country, input.calendarId, input.managerId, input.systemRole, input.status, input.weeklyCapacity, input.joinDate],
-    );
-    return rows[0]!;
+  const saved = await inTransaction(async (session) => {
+    const input = await validateEmployee(session, user, req.body, null);
+    const { password, ...fields } = input;
+    const passwordHash = await bcrypt.hash(password!, BCRYPT_ROUNDS);
+    const [doc] = await EmployeeModel.create([{ ...fields, organisationId: user.organisationId, passwordHash }], { session });
+    return doc!.toObject() as unknown as EmployeeLean;
   });
-  console.log(`[employees] ${user.email} created ${saved.email} (${saved.system_role}).`);
-  res.status(201).json(toEmployee(saved));
+  console.log(`[employees] ${user.email} created ${saved.email} (${saved.systemRole}).`);
+  res.status(201).json(employeeFromDoc(saved));
 });
 
 /** PUT /api/employees/:id — admin edits details, role and status; a non-empty password resets it. */
 employeesRouter.put('/:id', requireRole('admin'), async (req, res) => {
   const user = currentUser(res);
   const id = assertId(req.params.id, 'Employee');
-  const saved = await inTransaction(async (db) => {
-    const current = await db.query<{ system_role: Role; status: string }>(
-      'SELECT system_role, status FROM employees WHERE organisation_id = $1 AND id = $2 FOR UPDATE',
-      [user.organisationId, id],
-    );
-    const before = current.rows[0];
+  const saved = await inTransaction(async (session) => {
+    const before = await lockDoc<EmployeeLean>(EmployeeModel, { organisationId: user.organisationId, _id: id }, session);
     if (!before) throw new HttpError(404, 'Employee not found.');
 
-    const input = await validateEmployee(db, user, req.body, id);
+    const input = await validateEmployee(session, user, req.body, id);
     if (id === user.id && input.systemRole !== 'admin') throw new HttpError(400, 'You cannot remove your own administrator role.', { systemRole: 'You cannot remove your own administrator role.' });
     if (id === user.id && input.status !== 'active') throw new HttpError(400, 'You cannot deactivate your own account.', { status: 'You cannot deactivate your own account.' });
-    const losesAdmin = before.system_role === 'admin' && before.status === 'active' && (input.systemRole !== 'admin' || input.status !== 'active');
-    if (losesAdmin) await assertAnotherActiveAdmin(db, user.organisationId, id);
+    const losesAdmin = before.systemRole === 'admin' && before.status === 'active' && (input.systemRole !== 'admin' || input.status !== 'active');
+    if (losesAdmin) await assertAnotherActiveAdmin(session, user.organisationId, id);
 
-    const hash = input.password ? await bcrypt.hash(input.password, BCRYPT_ROUNDS) : null;
-    const { rows } = await db.query<EmployeeRow>(
-      `UPDATE employees SET employee_code = $3, name = $4, email = $5, phone = $6, department = $7, designation = $8,
-         work_location = $9, country = $10, calendar_id = $11, manager_id = $12, system_role = $13, status = $14,
-         weekly_capacity = $15, join_date = $16, password_hash = COALESCE($17, password_hash), updated_at = now()
-       WHERE organisation_id = $1 AND id = $2
-       RETURNING ${EMPLOYEE_COLUMNS}`,
-      [user.organisationId, id, input.employeeCode, input.name, input.email, input.phone, input.department, input.designation,
-        input.workLocation, input.country, input.calendarId, input.managerId, input.systemRole, input.status, input.weeklyCapacity, input.joinDate, hash],
-    );
-    return rows[0]!;
+    const { password, ...fields } = input;
+    const passwordHash = password ? await bcrypt.hash(password, BCRYPT_ROUNDS) : null;
+    const doc = await EmployeeModel.findOneAndUpdate(
+      { organisationId: user.organisationId, _id: id },
+      { $set: { ...fields, ...(passwordHash ? { passwordHash } : {}) } },
+      { session, returnDocument: 'after', runValidators: true },
+    ).select(EMPLOYEE_PUBLIC_FIELDS).lean<EmployeeLean>();
+    return doc!;
   });
-  res.json(toEmployee(saved));
+  res.json(employeeFromDoc(saved));
 });
 
 /** PATCH /api/employees/:id/status — activate / deactivate an account. */
@@ -223,19 +193,14 @@ employeesRouter.patch('/:id/status', requireRole('admin'), async (req, res) => {
   if (status !== 'active' && status !== 'inactive') throw new HttpError(400, 'Status must be "active" or "inactive".');
   if (id === user.id && status === 'inactive') throw new HttpError(400, 'You cannot deactivate your own account.');
 
-  const saved = await inTransaction(async (db) => {
-    const current = await db.query<{ system_role: Role; status: string }>(
-      'SELECT system_role, status FROM employees WHERE organisation_id = $1 AND id = $2 FOR UPDATE',
-      [user.organisationId, id],
-    );
-    const before = current.rows[0];
+  const saved = await inTransaction(async (session) => {
+    const before = await lockDoc<EmployeeLean>(EmployeeModel, { organisationId: user.organisationId, _id: id }, session);
     if (!before) throw new HttpError(404, 'Employee not found.');
-    if (status === 'inactive' && before.system_role === 'admin' && before.status === 'active') await assertAnotherActiveAdmin(db, user.organisationId, id);
-    const { rows } = await db.query<EmployeeRow>(
-      `UPDATE employees SET status = $3, updated_at = now() WHERE organisation_id = $1 AND id = $2 RETURNING ${EMPLOYEE_COLUMNS}`,
-      [user.organisationId, id, status],
-    );
-    return rows[0]!;
+    if (status === 'inactive' && before.systemRole === 'admin' && before.status === 'active') await assertAnotherActiveAdmin(session, user.organisationId, id);
+    const doc = await EmployeeModel.findOneAndUpdate({ organisationId: user.organisationId, _id: id }, { $set: { status } }, { session, returnDocument: 'after' })
+      .select(EMPLOYEE_PUBLIC_FIELDS)
+      .lean<EmployeeLean>();
+    return doc!;
   });
-  res.json(toEmployee(saved));
+  res.json(employeeFromDoc(saved));
 });

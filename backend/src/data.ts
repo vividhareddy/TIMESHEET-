@@ -1,33 +1,55 @@
-/** Shared loaders and row → API mappers for the operational modules (shapes match frontend/src/types). */
-import type { Db } from './db.js';
-import { EMPLOYEE_COLUMNS, toEmployee, type Employee, type EmployeeRow } from './models/employee.js';
+/** Shared loaders and document → API mappers for the operational modules (shapes match frontend/src/types). */
+import type { ClientSession, Model } from 'mongoose';
+import { EMPLOYEE_PUBLIC_FIELDS, EmployeeModel, employeeFromDoc, type Employee, type EmployeeLean } from './models/employee.js';
+import { Calendar as CalendarModel, Holiday } from './models/calendar.js';
+import { AllocationModel } from './models/project.js';
+import { LeaveRequestModel } from './models/requests.js';
+import { TimesheetEvent, TimesheetModel } from './models/timesheet.js';
 import type { CalendarLike } from './lib/workCalc.js';
 
-const num = (v: string | number | null | undefined): number => (v === null || v === undefined ? 0 : Number(v));
+/** The transaction a query belongs to, or null / undefined when it runs on its own. */
+export type Tx = ClientSession | null | undefined;
+
 const iso = (d: Date | null | undefined): string | undefined => (d ? d.toISOString() : undefined);
-/** Omits keys whose value is undefined (the frontend uses optional fields, not nulls). */
+/** Omits keys whose value is undefined or null (the frontend uses optional fields, not nulls). */
 const compact = <T>(o: Record<string, unknown>): T => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null)) as T;
+
+/**
+ * Takes a write lock on one document for the rest of the transaction (the equivalent of
+ * SELECT … FOR UPDATE) and returns it, or null when nothing matches. A concurrent transaction
+ * touching the same document conflicts and is retried after this one finishes, so checks made
+ * after locking cannot be invalidated by a parallel request.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function lockDoc<T>(model: Model<any>, filter: Record<string, unknown>, session: ClientSession): Promise<T | null> {
+  return model.findOneAndUpdate(filter, { $inc: { __v: 1 } }, { session, returnDocument: 'after', timestamps: false }).lean<T>().exec();
+}
 
 // ---------------------------------------------------------------- employees
 
-export async function loadEmployees(db: Db, org: string): Promise<Map<string, Employee>> {
-  const { rows } = await db.query<EmployeeRow>(`SELECT ${EMPLOYEE_COLUMNS} FROM employees WHERE organisation_id = $1`, [org]);
-  return new Map(rows.map((r) => [r.id, toEmployee(r)]));
+export async function loadEmployees(org: string, tx?: Tx): Promise<Map<string, Employee>> {
+  const docs = await EmployeeModel.find({ organisationId: org }).select(EMPLOYEE_PUBLIC_FIELDS).session(tx ?? null).lean<EmployeeLean[]>();
+  return new Map(docs.map((d) => [d._id, employeeFromDoc(d)]));
 }
 
 // ---------------------------------------------------------------- calendars
 
 export type Calendar = CalendarLike & { id: string };
 
-export async function loadCalendars(db: Db, org: string): Promise<Map<string, Calendar>> {
-  const { rows } = await db.query<{ id: string; working_days: number[]; hours_per_day: string; holidays: Calendar['holidays'] }>(
-    `SELECT c.id, c.working_days, c.hours_per_day,
-            COALESCE(json_agg(json_build_object('date', to_char(h.date, 'YYYY-MM-DD'), 'name', h.name, 'type', h.type)) FILTER (WHERE h.id IS NOT NULL), '[]') AS holidays
-       FROM calendars c LEFT JOIN holidays h ON h.calendar_id = c.id
-      WHERE c.organisation_id = $1 GROUP BY c.id`,
-    [org],
+export async function loadCalendars(org: string, tx?: Tx): Promise<Map<string, Calendar>> {
+  const calendars = await CalendarModel.find({ organisationId: org }).session(tx ?? null).lean();
+  const holidays = await Holiday.find({ calendarId: { $in: calendars.map((c) => c._id) } }).session(tx ?? null).lean();
+  return new Map(
+    calendars.map((c) => [
+      c._id,
+      {
+        id: c._id,
+        workingDays: c.workingDays,
+        hoursPerDay: c.hoursPerDay,
+        holidays: holidays.filter((h) => h.calendarId === c._id).map((h) => ({ date: h.date, name: h.name, type: h.type })),
+      },
+    ]),
   );
-  return new Map(rows.map((r) => [r.id, { id: r.id, workingDays: r.working_days, hoursPerDay: num(r.hours_per_day), holidays: r.holidays }]));
 }
 
 // -------------------------------------------------------------- allocations
@@ -42,41 +64,34 @@ export interface Allocation {
   endDate: string;
 }
 
-export const ALLOCATION_COLUMNS = `id, employee_id, project_id, project_role, weekly_hours,
-  to_char(start_date, 'YYYY-MM-DD') AS start_date, to_char(end_date, 'YYYY-MM-DD') AS end_date`;
-
-export interface AllocationRow {
-  id: string;
-  employee_id: string;
-  project_id: string;
-  project_role: string;
-  weekly_hours: string;
-  start_date: string;
-  end_date: string;
+export interface AllocationLean {
+  _id: string;
+  employeeId: string;
+  projectId: string;
+  projectRole: string;
+  weeklyHours: number;
+  startDate: string;
+  endDate: string;
 }
 
-export const toAllocation = (r: AllocationRow): Allocation => ({
-  id: r.id,
-  employeeId: r.employee_id,
-  projectId: r.project_id,
-  projectRole: r.project_role,
-  weeklyHours: num(r.weekly_hours),
-  startDate: r.start_date,
-  endDate: r.end_date,
+export const toAllocation = (d: AllocationLean): Allocation => ({
+  id: d._id,
+  employeeId: d.employeeId,
+  projectId: d.projectId,
+  projectRole: d.projectRole,
+  weeklyHours: d.weeklyHours,
+  startDate: d.startDate,
+  endDate: d.endDate,
 });
 
 /** Allocations overlapping [from, to] (both optional). */
-export async function loadAllocations(db: Db, org: string, range?: { from?: string; to?: string; employeeIds?: string[] }): Promise<Allocation[]> {
-  const { rows } = await db.query<AllocationRow>(
-    `SELECT ${ALLOCATION_COLUMNS} FROM allocations
-      WHERE organisation_id = $1
-        AND ($2::date IS NULL OR end_date >= $2::date)
-        AND ($3::date IS NULL OR start_date <= $3::date)
-        AND ($4::uuid[] IS NULL OR employee_id = ANY($4::uuid[]))
-      ORDER BY start_date, id`,
-    [org, range?.from ?? null, range?.to ?? null, range?.employeeIds ?? null],
-  );
-  return rows.map(toAllocation);
+export async function loadAllocations(org: string, range?: { from?: string; to?: string; employeeIds?: string[] }, tx?: Tx): Promise<Allocation[]> {
+  const filter: Record<string, unknown> = { organisationId: org };
+  if (range?.from) filter.endDate = { $gte: range.from };
+  if (range?.to) filter.startDate = { $lte: range.to };
+  if (range?.employeeIds) filter.employeeId = { $in: range.employeeIds };
+  const docs = await AllocationModel.find(filter).sort({ startDate: 1, _id: 1 }).session(tx ?? null).lean<AllocationLean[]>();
+  return docs.map(toAllocation);
 }
 
 // -------------------------------------------------------------------- leave
@@ -95,45 +110,39 @@ export interface LeaveRequest {
   reviewedAt?: string;
 }
 
-export const LEAVE_COLUMNS = `id, employee_id, to_char(date, 'YYYY-MM-DD') AS date, duration, hours, reason, status, applied_on,
-  reviewer_id, reviewer_comment, reviewed_at`;
-
-export interface LeaveRow {
-  id: string;
-  employee_id: string;
+export interface LeaveLean {
+  _id: string;
+  employeeId: string;
   date: string;
   duration: 'full' | 'half';
-  hours: string;
+  hours: number;
   reason: string;
-  status: 'pending' | 'approved' | 'rejected';
-  applied_on: Date;
-  reviewer_id: string | null;
-  reviewer_comment: string | null;
-  reviewed_at: Date | null;
+  status: 'pending' | 'approved' | 'rejected' | 'withdrawn';
+  appliedOn: Date;
+  reviewerId?: string | null;
+  reviewerComment?: string | null;
+  reviewedAt?: Date | null;
 }
 
-export const toLeave = (r: LeaveRow): LeaveRequest =>
+export const toLeave = (d: LeaveLean): LeaveRequest =>
   compact<LeaveRequest>({
-    id: r.id,
-    employeeId: r.employee_id,
-    date: r.date,
-    duration: r.duration,
-    hours: num(r.hours),
-    reason: r.reason,
-    status: r.status,
-    appliedOn: r.applied_on.toISOString(),
-    reviewerId: r.reviewer_id ?? undefined,
-    reviewerComment: r.reviewer_comment ?? undefined,
-    reviewedAt: iso(r.reviewed_at),
+    id: d._id,
+    employeeId: d.employeeId,
+    date: d.date,
+    duration: d.duration,
+    hours: d.hours,
+    reason: d.reason,
+    status: d.status,
+    appliedOn: d.appliedOn.toISOString(),
+    reviewerId: d.reviewerId,
+    reviewerComment: d.reviewerComment,
+    reviewedAt: iso(d.reviewedAt),
   });
 
 /** Approved leave in [from, to] — the only leave that reduces expected hours. */
-export async function loadApprovedLeaves(db: Db, org: string, from: string, to: string): Promise<LeaveRequest[]> {
-  const { rows } = await db.query<LeaveRow>(
-    `SELECT ${LEAVE_COLUMNS} FROM leave_requests WHERE organisation_id = $1 AND status = 'approved' AND date BETWEEN $2 AND $3`,
-    [org, from, to],
-  );
-  return rows.map(toLeave);
+export async function loadApprovedLeaves(org: string, from: string, to: string, tx?: Tx): Promise<LeaveRequest[]> {
+  const docs = await LeaveRequestModel.find({ organisationId: org, status: 'approved', date: { $gte: from, $lte: to } }).session(tx ?? null).lean<LeaveLean[]>();
+  return docs.map(toLeave);
 }
 
 // ----------------------------------------------------------------- overtime
@@ -155,42 +164,39 @@ export interface OvertimeRequest {
   timesheetId?: string;
 }
 
-export const OVERTIME_COLUMNS = `id, employee_id, project_id, to_char(week_start, 'YYYY-MM-DD') AS week_start, to_char(date, 'YYYY-MM-DD') AS date,
-  hours, reason, source, status, created_at, reviewer_id, reviewer_comment, reviewed_at, timesheet_id`;
-
-export interface OvertimeRow {
-  id: string;
-  employee_id: string;
-  project_id: string;
-  week_start: string;
-  date: string | null;
-  hours: string;
+export interface OvertimeLean {
+  _id: string;
+  employeeId: string;
+  projectId: string;
+  weekStart: string;
+  date?: string | null;
+  hours: number;
   reason: string;
   source: 'timesheet' | 'pre_approval';
   status: 'pending' | 'approved' | 'rejected';
-  created_at: Date;
-  reviewer_id: string | null;
-  reviewer_comment: string | null;
-  reviewed_at: Date | null;
-  timesheet_id: string | null;
+  createdAt: Date;
+  reviewerId?: string | null;
+  reviewerComment?: string | null;
+  reviewedAt?: Date | null;
+  timesheetId?: string | null;
 }
 
-export const toOvertime = (r: OvertimeRow): OvertimeRequest =>
+export const toOvertime = (d: OvertimeLean): OvertimeRequest =>
   compact<OvertimeRequest>({
-    id: r.id,
-    employeeId: r.employee_id,
-    projectId: r.project_id,
-    weekStart: r.week_start,
-    date: r.date ?? undefined,
-    hours: num(r.hours),
-    reason: r.reason,
-    source: r.source,
-    status: r.status,
-    createdAt: r.created_at.toISOString(),
-    reviewerId: r.reviewer_id ?? undefined,
-    reviewerComment: r.reviewer_comment ?? undefined,
-    reviewedAt: iso(r.reviewed_at),
-    timesheetId: r.timesheet_id ?? undefined,
+    id: d._id,
+    employeeId: d.employeeId,
+    projectId: d.projectId,
+    weekStart: d.weekStart,
+    date: d.date,
+    hours: d.hours,
+    reason: d.reason,
+    source: d.source,
+    status: d.status,
+    createdAt: d.createdAt.toISOString(),
+    reviewerId: d.reviewerId,
+    reviewerComment: d.reviewerComment,
+    reviewedAt: iso(d.reviewedAt),
+    timesheetId: d.timesheetId,
   });
 
 // --------------------------------------------------------------- timesheets
@@ -227,6 +233,51 @@ export interface Timesheet {
   history: ApprovalEvent[];
 }
 
+/** A timesheet entry as stored (embedded in its timesheet document). */
+export interface EntryLean {
+  projectId: string;
+  hours: number[];
+  originalHours?: number[] | null;
+  description?: string;
+  status: EntryStatus;
+  managerComment?: string | null;
+  reviewedBy?: string | null;
+  reviewedAt?: Date | null;
+  updatedAt?: Date;
+}
+
+export interface TimesheetLean {
+  _id: string;
+  organisationId: string;
+  employeeId: string;
+  weekStart: string;
+  submittedAt?: Date | null;
+  updatedAt: Date;
+  entries: EntryLean[];
+}
+
+interface EventLean {
+  _id: string;
+  timesheetId: string;
+  at: Date;
+  actorId: string;
+  action: string;
+  projectId?: string | null;
+  comment?: string | null;
+}
+
+export const toEntry = (e: EntryLean): TimesheetEntry =>
+  compact<TimesheetEntry>({
+    projectId: e.projectId,
+    hours: e.hours,
+    description: e.description ?? '',
+    status: e.status,
+    managerComment: e.managerComment,
+    originalHours: e.originalHours?.length ? e.originalHours : undefined,
+    reviewedBy: e.reviewedBy,
+    reviewedAt: iso(e.reviewedAt),
+  });
+
 export interface TimesheetFilter {
   ids?: string[];
   employeeIds?: string[];
@@ -235,56 +286,40 @@ export interface TimesheetFilter {
   to?: string;
 }
 
-/** Loads timesheets with their entries and history in three queries. */
-export async function fetchTimesheets(db: Db, org: string, f: TimesheetFilter = {}): Promise<Timesheet[]> {
-  const ts = await db.query<{ id: string; employee_id: string; week_start: string; submitted_at: Date | null; updated_at: Date }>(
-    `SELECT id, employee_id, to_char(week_start, 'YYYY-MM-DD') AS week_start, submitted_at, updated_at
-       FROM timesheets
-      WHERE organisation_id = $1
-        AND ($2::uuid[] IS NULL OR id = ANY($2::uuid[]))
-        AND ($3::uuid[] IS NULL OR employee_id = ANY($3::uuid[]))
-        AND ($4::date IS NULL OR week_start = $4::date)
-        AND ($5::date IS NULL OR week_start >= $5::date)
-        AND ($6::date IS NULL OR week_start <= $6::date)
-      ORDER BY week_start DESC, employee_id`,
-    [org, f.ids ?? null, f.employeeIds ?? null, f.weekStart ?? null, f.from ?? null, f.to ?? null],
-  );
-  if (!ts.rows.length) return [];
-  const ids = ts.rows.map((r) => r.id);
-  const [entries, events] = await Promise.all([
-    db.query<{
-      timesheet_id: string; project_id: string; hours: string[]; original_hours: string[] | null; description: string; status: EntryStatus;
-      manager_comment: string | null; reviewed_by: string | null; reviewed_at: Date | null;
-    }>(
-      `SELECT timesheet_id, project_id, hours, original_hours, description, status, manager_comment, reviewed_by, reviewed_at
-         FROM timesheet_entries WHERE timesheet_id = ANY($1::uuid[]) ORDER BY position, project_id`,
-      [ids],
-    ),
-    db.query<{ id: string; timesheet_id: string; at: Date; actor_id: string; action: string; project_id: string | null; comment: string | null }>(
-      'SELECT id, timesheet_id, at, actor_id, action, project_id, comment FROM timesheet_events WHERE timesheet_id = ANY($1::uuid[]) ORDER BY at, id',
-      [ids],
-    ),
-  ]);
-  return ts.rows.map((t) => ({
-    ...compact<Omit<Timesheet, "entries" | "history">>({ id: t.id, employeeId: t.employee_id, weekStart: t.week_start, submittedAt: iso(t.submitted_at), updatedAt: t.updated_at.toISOString() }),
-    entries: entries.rows
-      .filter((e) => e.timesheet_id === t.id)
-      .map((e) =>
-        compact<TimesheetEntry>({
-          projectId: e.project_id,
-          hours: e.hours.map(Number),
-          description: e.description,
-          status: e.status,
-          managerComment: e.manager_comment ?? undefined,
-          originalHours: e.original_hours?.map(Number),
-          reviewedBy: e.reviewed_by ?? undefined,
-          reviewedAt: iso(e.reviewed_at),
-        }),
-      ),
-    history: events.rows
-      .filter((h) => h.timesheet_id === t.id)
-      .map((h) => compact<ApprovalEvent>({ id: h.id, at: h.at.toISOString(), actorId: h.actor_id, action: h.action, projectId: h.project_id ?? undefined, comment: h.comment ?? undefined })),
+/** Loads timesheets (entries are embedded) and their history in two queries. */
+export async function fetchTimesheets(org: string, f: TimesheetFilter = {}, tx?: Tx): Promise<Timesheet[]> {
+  const filter: Record<string, unknown> = { organisationId: org };
+  if (f.ids) filter._id = { $in: f.ids };
+  if (f.employeeIds) filter.employeeId = { $in: f.employeeIds };
+  if (f.weekStart) filter.weekStart = f.weekStart;
+  else if (f.from || f.to) filter.weekStart = { ...(f.from ? { $gte: f.from } : {}), ...(f.to ? { $lte: f.to } : {}) };
+
+  const sheets = await TimesheetModel.find(filter).sort({ weekStart: -1, employeeId: 1 }).session(tx ?? null).lean<TimesheetLean[]>();
+  if (!sheets.length) return [];
+  const events = await TimesheetEvent.find({ timesheetId: { $in: sheets.map((t) => t._id) } }).sort({ at: 1, _id: 1 }).session(tx ?? null).lean<EventLean[]>();
+  const history = new Map<string, ApprovalEvent[]>();
+  for (const h of events) {
+    const list = history.get(h.timesheetId) ?? [];
+    list.push(compact<ApprovalEvent>({ id: h._id, at: h.at.toISOString(), actorId: h.actorId, action: h.action, projectId: h.projectId, comment: h.comment }));
+    history.set(h.timesheetId, list);
+  }
+  return sheets.map((t) => ({
+    ...compact<Omit<Timesheet, 'entries' | 'history'>>({ id: t._id, employeeId: t.employeeId, weekStart: t.weekStart, submittedAt: iso(t.submittedAt), updatedAt: t.updatedAt.toISOString() }),
+    entries: (t.entries ?? []).map(toEntry),
+    history: history.get(t._id) ?? [],
   }));
+}
+
+/** Number of timesheet entries per status among the timesheets matching `match` and entries matching `entry`. */
+export async function countEntriesByStatus(match: Record<string, unknown>, entry: Record<string, unknown> = {}): Promise<Map<EntryStatus, number>> {
+  const prefixed = Object.fromEntries(Object.entries(entry).map(([k, v]) => [`entries.${k}`, v]));
+  const rows = await TimesheetModel.aggregate<{ _id: EntryStatus; n: number }>([
+    { $match: { ...match, ...(Object.keys(entry).length ? { entries: { $elemMatch: entry } } : {}) } },
+    { $unwind: '$entries' },
+    ...(Object.keys(prefixed).length ? [{ $match: prefixed }] : []),
+    { $group: { _id: '$entries.status', n: { $sum: 1 } } },
+  ]);
+  return new Map(rows.map((r) => [r._id, r.n]));
 }
 
 export const isEntryLocked = (status: EntryStatus): boolean => status === 'pending' || status === 'approved';

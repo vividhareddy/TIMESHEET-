@@ -5,38 +5,38 @@
  *  - administrators see everything in their organisation.
  */
 import type { AuthUser } from './auth.js';
-import type { Db } from './db.js';
+import type { Tx } from './data.js';
+import { EmployeeModel } from './models/employee.js';
+import { AllocationModel, Project } from './models/project.js';
+import { todayISO } from './lib/dates.js';
 
-export async function managedProjectIds(db: Db, user: AuthUser): Promise<Set<string>> {
-  const { rows } = await db.query<{ id: string }>('SELECT id FROM projects WHERE organisation_id = $1 AND manager_id = $2', [user.organisationId, user.id]);
-  return new Set(rows.map((r) => r.id));
+export async function managedProjectIds(user: AuthUser, tx?: Tx): Promise<Set<string>> {
+  const ids = await Project.distinct('_id', { organisationId: user.organisationId, managerId: user.id }).session(tx ?? null);
+  return new Set(ids as string[]);
+}
+
+/** Direct reports of the user. */
+export async function directReportIds(user: AuthUser, tx?: Tx): Promise<Set<string>> {
+  const ids = await EmployeeModel.distinct('_id', { organisationId: user.organisationId, managerId: user.id }).session(tx ?? null);
+  return new Set(ids as string[]);
 }
 
 /** Team = people allocated (now or in future) to the manager's projects, plus direct reports. */
-export async function teamEmployeeIds(db: Db, user: AuthUser): Promise<Set<string>> {
-  const { rows } = await db.query<{ id: string }>(
-    `SELECT a.employee_id AS id FROM allocations a JOIN projects p ON p.id = a.project_id
-      WHERE a.organisation_id = $1 AND p.manager_id = $2 AND a.end_date >= CURRENT_DATE
-     UNION
-     SELECT id FROM employees WHERE organisation_id = $1 AND manager_id = $2`,
-    [user.organisationId, user.id],
-  );
-  const ids = new Set(rows.map((r) => r.id));
+export async function teamEmployeeIds(user: AuthUser, tx?: Tx): Promise<Set<string>> {
+  const [projects, reports] = await Promise.all([managedProjectIds(user, tx), directReportIds(user, tx)]);
+  const allocated = projects.size
+    ? await AllocationModel.distinct('employeeId', { organisationId: user.organisationId, projectId: { $in: [...projects] }, endDate: { $gte: todayISO() } }).session(tx ?? null)
+    : [];
+  const ids = new Set<string>([...(allocated as string[]), ...reports]);
   ids.delete(user.id);
   return ids;
 }
 
 /** Employees whose operational records (timesheets, allocations, leave) the user may read. */
-export async function visibleEmployeeIds(db: Db, user: AuthUser): Promise<Set<string> | 'all'> {
+export async function visibleEmployeeIds(user: AuthUser, tx?: Tx): Promise<Set<string> | 'all'> {
   if (user.systemRole === 'admin') return 'all';
-  if (user.systemRole === 'manager') return new Set([user.id, ...(await teamEmployeeIds(db, user))]);
+  if (user.systemRole === 'manager') return new Set([user.id, ...(await teamEmployeeIds(user, tx))]);
   return new Set([user.id]);
 }
 
 export const canSee = (scope: Set<string> | 'all', employeeId: string): boolean => scope === 'all' || scope.has(employeeId);
-
-/** Direct reports of the user. */
-export async function directReportIds(db: Db, user: AuthUser): Promise<Set<string>> {
-  const { rows } = await db.query<{ id: string }>('SELECT id FROM employees WHERE organisation_id = $1 AND manager_id = $2', [user.organisationId, user.id]);
-  return new Set(rows.map((r) => r.id));
-}

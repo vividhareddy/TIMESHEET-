@@ -15,20 +15,8 @@ export function assertValid(errors: Record<string, string>): void {
   if (Object.keys(errors).length > 0) throw new HttpError(400, 'Please correct the highlighted fields.', errors);
 }
 
-/** PostgreSQL / network error codes that mean "the database is unavailable", not "bad request". */
-const DB_UNAVAILABLE = new Set(['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', '28P01', '28000', '3D000', '57P01', '57P03']);
-
-export function isDbUnavailable(err: unknown): boolean {
-  const code = (err as { code?: unknown })?.code;
-  const message = (err as { message?: unknown })?.message;
-  return (typeof code === 'string' && DB_UNAVAILABLE.has(code)) || (typeof message === 'string' && /timeout exceeded when trying to connect/i.test(message));
-}
-
-/** Unique-constraint name of a PostgreSQL unique violation (23505), if that is what err is. */
-export function uniqueViolation(err: unknown): string | null {
-  const e = err as { code?: string; constraint?: string };
-  return e?.code === '23505' ? (e.constraint ?? '') : null;
-}
+// Database error classification lives with the connection; re-exported here for the route modules.
+export { isDbUnavailable, uniqueViolation } from './mongo.js';
 
 // ----------------------------------------------------------- input helpers
 
@@ -54,7 +42,7 @@ export function passwordProblem(password: string): string | null {
   return null;
 }
 
-/** Throws 404 for a malformed id instead of letting PostgreSQL reject it. */
+/** Throws 404 for a malformed id (every document id is a UUID string). */
 export function assertId(id: string | string[] | undefined, what: string): string {
   if (!isUuid(id)) throw new HttpError(404, `${what} not found.`);
   return id;

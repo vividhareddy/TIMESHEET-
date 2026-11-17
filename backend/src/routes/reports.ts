@@ -1,9 +1,12 @@
-/** Dashboards and reports — every figure is computed from PostgreSQL records at request time. */
+/** Dashboards and reports — every figure is computed from the stored MongoDB records at request time. */
 import { Router } from 'express';
-import { pool } from '../db.js';
 import { currentUser, requireAuth, requireRole } from '../auth.js';
 import { HttpError, isISODate, isUuid, str } from '../http.js';
-import { OVERTIME_COLUMNS, fetchTimesheets, loadAllocations, loadApprovedLeaves, loadCalendars, loadEmployees, toOvertime, type OvertimeRow, type Timesheet } from '../data.js';
+import { countEntriesByStatus, fetchTimesheets, loadAllocations, loadApprovedLeaves, loadCalendars, loadEmployees, toOvertime, type OvertimeLean, type Timesheet } from '../data.js';
+import { CASE_INSENSITIVE } from '../models/common.js';
+import { EmployeeModel } from '../models/employee.js';
+import { AllocationModel, Project } from '../models/project.js';
+import { OvertimeRequestModel } from '../models/requests.js';
 import { managedProjectIds, teamEmployeeIds } from '../scope.js';
 import { readPolicy } from './organisation.js';
 import { addDays, currentWeekStart, startOfWeek, sum, todayISO } from '../lib/dates.js';
@@ -28,53 +31,47 @@ reportsRouter.use(requireAuth);
 /** GET /api/reports/dashboard/admin */
 reportsRouter.get('/dashboard/admin', requireRole('admin'), async (_req, res) => {
   const org = currentUser(res).organisationId;
-  const { rows } = await pool.query<Record<string, string>>(
-    `SELECT
-       (SELECT count(*) FROM employees WHERE organisation_id = $1 AND status = 'active')   AS active_employees,
-       (SELECT count(*) FROM employees WHERE organisation_id = $1 AND status = 'inactive') AS inactive_employees,
-       (SELECT count(*) FROM projects  WHERE organisation_id = $1 AND status = 'active')   AS active_projects,
-       (SELECT count(*) FROM projects  WHERE organisation_id = $1)                         AS total_projects,
-       (SELECT count(*) FROM allocations WHERE organisation_id = $1 AND $2::date BETWEEN start_date AND end_date) AS active_allocations,
-       (SELECT count(DISTINCT employee_id) FROM allocations WHERE organisation_id = $1 AND $2::date BETWEEN start_date AND end_date) AS allocated_people,
-       (SELECT COALESCE(sum(weekly_hours), 0) FROM allocations WHERE organisation_id = $1 AND $2::date BETWEEN start_date AND end_date) AS weekly_allocated_hours,
-       (SELECT count(*) FROM timesheet_entries e JOIN timesheets t ON t.id = e.timesheet_id WHERE t.organisation_id = $1 AND e.status = 'pending') AS pending_approvals`,
-    [org, todayISO()],
-  );
-  const r = rows[0]!;
+  const today = todayISO();
+  const [activeEmployees, inactiveEmployees, activeProjects, totalProjects, currentAllocations, entryCounts] = await Promise.all([
+    EmployeeModel.countDocuments({ organisationId: org, status: 'active' }),
+    EmployeeModel.countDocuments({ organisationId: org, status: 'inactive' }),
+    Project.countDocuments({ organisationId: org, status: 'active' }),
+    Project.countDocuments({ organisationId: org }),
+    // Allocations in force today.
+    AllocationModel.find({ organisationId: org, startDate: { $lte: today }, endDate: { $gte: today } })
+      .select('employeeId weeklyHours')
+      .lean<Array<{ employeeId: string; weeklyHours: number }>>(),
+    countEntriesByStatus({ organisationId: org }, { status: 'pending' }),
+  ]);
   res.json({
-    activeEmployees: Number(r.active_employees),
-    inactiveEmployees: Number(r.inactive_employees),
-    activeProjects: Number(r.active_projects),
-    totalProjects: Number(r.total_projects),
-    activeAllocations: Number(r.active_allocations),
-    allocatedPeople: Number(r.allocated_people),
-    pendingApprovals: Number(r.pending_approvals),
-    weeklyAllocatedHours: Number(r.weekly_allocated_hours),
+    activeEmployees,
+    inactiveEmployees,
+    activeProjects,
+    totalProjects,
+    activeAllocations: currentAllocations.length,
+    allocatedPeople: new Set(currentAllocations.map((a) => a.employeeId)).size,
+    pendingApprovals: entryCounts.get('pending') ?? 0,
+    weeklyAllocatedHours: sum(currentAllocations.map((a) => a.weeklyHours)),
   });
 });
 
 /** GET /api/reports/dashboard/manager — for the signed-in project manager's own projects. */
 reportsRouter.get('/dashboard/manager', requireRole('manager', 'admin'), async (_req, res) => {
   const user = currentUser(res);
-  const [projects, team] = await Promise.all([managedProjectIds(pool, user), teamEmployeeIds(pool, user)]);
+  const [projects, team] = await Promise.all([managedProjectIds(user), teamEmployeeIds(user)]);
   const ids = [...projects];
-  const { rows } = await pool.query<{ status: EntryStatus; n: string }>(
-    `SELECT e.status, count(*) AS n FROM timesheet_entries e JOIN timesheets t ON t.id = e.timesheet_id
-      WHERE t.organisation_id = $1 AND e.project_id = ANY($2::uuid[]) GROUP BY e.status`,
-    [user.organisationId, ids],
-  );
-  const count = (...s: EntryStatus[]) => sum(rows.filter((r) => s.includes(r.status)).map((r) => Number(r.n)));
-  const ot = await pool.query<{ n: string }>(
-    "SELECT count(*) AS n FROM overtime_requests WHERE organisation_id = $1 AND project_id = ANY($2::uuid[]) AND status = 'pending'",
-    [user.organisationId, ids],
-  );
+  const [counts, pendingOvertime] = await Promise.all([
+    countEntriesByStatus({ organisationId: user.organisationId }, { projectId: { $in: ids } }),
+    OvertimeRequestModel.countDocuments({ organisationId: user.organisationId, projectId: { $in: ids }, status: 'pending' }),
+  ]);
+  const count = (...statuses: EntryStatus[]) => sum(statuses.map((s) => counts.get(s) ?? 0));
   res.json({
     assignedProjects: projects.size,
     teamMembers: team.size,
     pendingApprovals: count('pending'),
     approvedEntries: count('approved'),
     returnedEntries: count('returned', 'rejected'),
-    pendingOvertime: Number(ot.rows[0]?.n ?? 0),
+    pendingOvertime,
   });
 });
 
@@ -84,14 +81,11 @@ reportsRouter.get('/dashboard/associate', async (_req, res) => {
   const org = user.organisationId;
   const W = currentWeekStart();
   const [timesheets, calendars, leaves, allocations, pending] = await Promise.all([
-    fetchTimesheets(pool, org, { employeeIds: [user.id], weekStart: W }),
-    loadCalendars(pool, org),
-    loadApprovedLeaves(pool, org, W, addDays(W, 6)),
-    loadAllocations(pool, org, { from: W, to: addDays(W, 6), employeeIds: [user.id] }),
-    pool.query<{ n: string }>(
-      "SELECT count(*) AS n FROM timesheet_entries e JOIN timesheets t ON t.id = e.timesheet_id WHERE t.employee_id = $1 AND e.status = 'pending'",
-      [user.id],
-    ),
+    fetchTimesheets(org, { employeeIds: [user.id], weekStart: W }),
+    loadCalendars(org),
+    loadApprovedLeaves(org, W, addDays(W, 6)),
+    loadAllocations(org, { from: W, to: addDays(W, 6), employeeIds: [user.id] }),
+    countEntriesByStatus({ employeeId: user.id }, { status: 'pending' }),
   ]);
   const ts = timesheets[0];
   const expected = expectedWeekHours(user, calendars.get(user.calendarId), leaves, W);
@@ -103,7 +97,7 @@ reportsRouter.get('/dashboard/associate', async (_req, res) => {
     enteredHours: entered,
     remainingHours: Math.max(0, expected - entered),
     currentStatus: deriveTimesheetStatus(ts),
-    entriesAwaitingApproval: Number(pending.rows[0]?.n ?? 0),
+    entriesAwaitingApproval: pending.get('pending') ?? 0,
   });
 });
 
@@ -123,22 +117,24 @@ reportsRouter.get('/hours', requireRole('admin', 'manager'), async (req, res) =>
   const lastDay = addDays(weeks[weeks.length - 1]!, 6);
   const weekSet = new Set(weeks);
 
-  const { rows: projectRows } = await pool.query<{ id: string; name: string; color: string; manager_id: string }>(
-    'SELECT id, name, color, manager_id FROM projects WHERE organisation_id = $1 ORDER BY lower(name)',
-    [org],
-  );
-  const visible = user.systemRole === 'admin' ? new Set(projectRows.map((p) => p.id)) : await managedProjectIds(pool, user);
+  const projectDocs = await Project.find({ organisationId: org })
+    .select('name color managerId')
+    .collation(CASE_INSENSITIVE)
+    .sort({ name: 1 })
+    .lean<Array<{ _id: string; name: string; color: string; managerId: string }>>();
+  const projectRows = projectDocs.map((p) => ({ id: p._id, name: p.name, color: p.color, managerId: p.managerId }));
+  const visible = user.systemRole === 'admin' ? new Set(projectRows.map((p) => p.id)) : await managedProjectIds(user);
   if (projectId && (!isUuid(projectId) || !visible.has(projectId))) throw new HttpError(403, 'You do not have permission to report on this project.');
   const scope = projectId ? new Set([projectId]) : visible;
 
-  const [employees, calendars, timesheets, allocations, leaves, policy, otRows] = await Promise.all([
-    loadEmployees(pool, org),
-    loadCalendars(pool, org),
-    fetchTimesheets(pool, org, { from, to: weeks[weeks.length - 1]! }),
-    loadAllocations(pool, org, { from, to: lastDay }),
-    loadApprovedLeaves(pool, org, from, lastDay),
+  const [employees, calendars, timesheets, allocations, leaves, policy, otDocs] = await Promise.all([
+    loadEmployees(org),
+    loadCalendars(org),
+    fetchTimesheets(org, { from, to: weeks[weeks.length - 1]! }),
+    loadAllocations(org, { from, to: lastDay }),
+    loadApprovedLeaves(org, from, lastDay),
     readPolicy(org),
-    pool.query<OvertimeRow>(`SELECT ${OVERTIME_COLUMNS} FROM overtime_requests WHERE organisation_id = $1 AND week_start BETWEEN $2 AND $3`, [org, from, to]),
+    OvertimeRequestModel.find({ organisationId: org, weekStart: { $gte: from, $lte: to } }).lean<OvertimeLean[]>(),
   ]);
 
   const facts = timesheets
@@ -179,7 +175,7 @@ reportsRouter.get('/hours', requireRole('admin', 'manager'), async (req, res) =>
         projectId: p.id,
         name: p.name,
         color: p.color,
-        managerName: nameOf(p.manager_id),
+        managerName: nameOf(p.managerId),
         team: new Set(allocs.filter((a) => weeks.some((w) => overlapsWeek(a, w))).map((a) => a.employeeId)).size,
         allocated: sum(weeks.map((w) => sum(allocs.filter((a) => overlapsWeek(a, w)).map((a) => a.weeklyHours)))),
         actual: hoursOf(mine),
@@ -217,7 +213,7 @@ reportsRouter.get('/hours', requireRole('admin', 'manager'), async (req, res) =>
   });
 
   // Overtime
-  const ot = otRows.rows.map(toOvertime).filter((o) => scope.has(o.projectId) && weekSet.has(o.weekStart));
+  const ot = otDocs.map(toOvertime).filter((o) => scope.has(o.projectId) && weekSet.has(o.weekStart));
   const otMap = new Map<string, { employeeId: string; name: string; approved: number; pending: number; rejected: number; payable: number }>();
   for (const o of ot) {
     const row = otMap.get(o.employeeId) ?? { employeeId: o.employeeId, name: nameOf(o.employeeId), approved: 0, pending: 0, rejected: 0, payable: 0 };

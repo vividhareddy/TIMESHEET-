@@ -1,14 +1,13 @@
 import { Router } from 'express';
 import bcrypt from 'bcrypt';
-import { pool } from '../db.js';
+import { withTransaction } from '../mongo.js';
 import { currentUser, requireAuth, revokeToken, signToken } from '../auth.js';
 import { EMAIL_RE, HttpError, assertValid, passwordProblem, str, uniqueViolation } from '../http.js';
-import { EMPLOYEE_COLUMNS, toEmployee, type EmployeeRow } from '../models/employee.js';
+import { EmployeeModel, employeeFromDoc, type EmployeeLean } from '../models/employee.js';
+import { Organisation, SystemFlag } from '../models/organisation.js';
 
 /** bcrypt work factor. 12 ≈ a few hundred ms per hash on current hardware. */
 export const BCRYPT_ROUNDS = 12;
-/** Serialises concurrent setup requests so two first-run submissions cannot both succeed. */
-const SETUP_LOCK_ID = 7_210_001;
 
 // ------------------------------------------------- failed-login throttling
 
@@ -84,8 +83,7 @@ export const authRouter = Router();
 
 /** GET /api/auth/setup-status — true until the organisation and first administrator exist. */
 authRouter.get('/setup-status', async (_req, res) => {
-  const { rows } = await pool.query<{ exists: boolean }>('SELECT EXISTS (SELECT 1 FROM organisations) AS "exists"');
-  res.json({ needsSetup: !rows[0]?.exists });
+  res.json({ needsSetup: !(await Organisation.exists({})) });
 });
 
 /**
@@ -95,43 +93,34 @@ authRouter.get('/setup-status', async (_req, res) => {
  */
 authRouter.post('/setup', async (req, res) => {
   const input = validateSetup(req.body);
-  // Hash before opening the transaction so the lock is not held during the slow bcrypt step.
+  // Hash before opening the transaction so it is not held open during the slow bcrypt step.
   const passwordHash = await bcrypt.hash(input.password, BCRYPT_ROUNDS);
 
-  const client = await pool.connect();
   try {
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock($1)', [SETUP_LOCK_ID]);
-
-    const existing = await client.query('SELECT 1 FROM organisations LIMIT 1');
-    if (existing.rowCount) throw new HttpError(409, 'Setup has already been completed. Please sign in.');
-
-    const org = await client.query<{ id: string; name: string }>(
-      'INSERT INTO organisations (name) VALUES ($1) RETURNING id, name',
-      [input.organisationName],
-    );
-    const organisation = org.rows[0]!;
-
-    const emp = await client.query<EmployeeRow>(
-      `INSERT INTO employees (organisation_id, employee_code, name, email, password_hash, designation, system_role, last_login_at)
-       VALUES ($1, 'EMP0001', $2, $3, $4, 'Administrator', 'admin', now())
-       RETURNING ${EMPLOYEE_COLUMNS}`,
-      [organisation.id, input.name, input.email, passwordHash],
-    );
-    const admin = emp.rows[0]!;
-
-    await client.query('COMMIT');
+    const { organisation, admin } = await withTransaction(async (session) => {
+      if (await Organisation.exists({}).session(session)) throw new HttpError(409, 'Setup has already been completed. Please sign in.');
+      // The fixed-id marker makes two concurrent first-run submissions conflict, so only one can commit.
+      await SystemFlag.create([{ _id: 'setup' }], { session });
+      const [org] = await Organisation.create([{ name: input.organisationName }], { session });
+      const [emp] = await EmployeeModel.create(
+        [{
+          organisationId: org!._id, employeeCode: 'EMP0001', name: input.name, email: input.email, passwordHash,
+          designation: 'Administrator', systemRole: 'admin', lastLoginAt: new Date(),
+        }],
+        { session },
+      );
+      return { organisation: { id: org!._id, name: org!.name }, admin: emp!.toObject() as unknown as EmployeeLean };
+    });
     console.log(`[auth] Organisation "${organisation.name}" created with administrator ${admin.email}.`);
-    const { token, expiresAt } = signToken(admin.id, false);
-    res.status(201).json({ token, expiresAt, user: toEmployee(admin), organisation });
+    const { token, expiresAt } = signToken(admin._id, false);
+    res.status(201).json({ token, expiresAt, user: employeeFromDoc(admin), organisation });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    const constraint = uniqueViolation(err);
-    if (constraint === 'employees_email_key') throw new HttpError(409, 'An account with this email already exists.', { email: 'This email is already registered.' });
-    if (constraint === 'organisations_name_key') throw new HttpError(409, 'This organisation is already registered.', { organisationName: 'This organisation is already registered.' });
-    throw err;
-  } finally {
-    client.release();
+    const index = uniqueViolation(err);
+    if (index === null) throw err;
+    if (index === 'employees_email_key') throw new HttpError(409, 'An account with this email already exists.', { email: 'This email is already registered.' });
+    if (index === 'organisations_name_key') throw new HttpError(409, 'This organisation is already registered.', { organisationName: 'This organisation is already registered.' });
+    // The setup marker (or the first employee code) already exists: another setup request won.
+    throw new HttpError(409, 'Setup has already been completed. Please sign in.');
   }
 });
 
@@ -150,12 +139,9 @@ authRouter.post('/login', async (req, res) => {
   const key = throttleKey(req.ip, email);
   assertNotLockedOut(key);
 
-  const { rows } = await pool.query<EmployeeRow & { password_hash: string }>(
-    `SELECT ${EMPLOYEE_COLUMNS}, password_hash FROM employees WHERE lower(email) = $1`,
-    [email],
-  );
-  const row = rows[0];
-  const valid = await bcrypt.compare(password, row?.password_hash ?? DUMMY_HASH);
+  // Emails are stored lower-case, so this exact match is case-insensitive.
+  const row = await EmployeeModel.findOne({ email }).lean<EmployeeLean>();
+  const valid = await bcrypt.compare(password, row?.passwordHash ?? DUMMY_HASH);
   if (!row || !valid) {
     recordFailure(key);
     throw new HttpError(401, 'Invalid email or password.');
@@ -164,9 +150,9 @@ authRouter.post('/login', async (req, res) => {
   // Only revealed after the correct password, so it does not leak which accounts exist.
   if (row.status !== 'active') throw new HttpError(403, 'Your account is inactive. Contact your administrator.');
 
-  await pool.query('UPDATE employees SET last_login_at = now() WHERE id = $1', [row.id]);
-  const { token, expiresAt } = signToken(row.id, rememberMe);
-  res.json({ token, expiresAt, user: toEmployee(row) });
+  await EmployeeModel.updateOne({ _id: row._id }, { $set: { lastLoginAt: new Date() } }, { timestamps: false });
+  const { token, expiresAt } = signToken(row._id, rememberMe);
+  res.json({ token, expiresAt, user: employeeFromDoc(row) });
 });
 
 /** GET /api/auth/me — the signed-in employee. */

@@ -1,46 +1,47 @@
 /** Client projects. Reads: any signed-in user. Writes: administrators. */
 import { Router } from 'express';
-import { pool } from '../db.js';
+import { withTransaction } from '../mongo.js';
 import { currentUser, requireAuth, requireRole } from '../auth.js';
 import { HttpError, assertId, assertValid, isISODate, isUuid, str, uniqueViolation } from '../http.js';
+import { lockDoc } from '../data.js';
+import { CASE_INSENSITIVE } from '../models/common.js';
+import { EmployeeModel } from '../models/employee.js';
+import { AllocationModel, PROJECT_STATUSES, Project, type ProjectStatus } from '../models/project.js';
+import { OvertimeRequestModel } from '../models/requests.js';
+import { TimesheetEvent, TimesheetModel } from '../models/timesheet.js';
 
-const STATUSES = ['active', 'on_hold', 'completed', 'inactive'] as const;
-type ProjectStatus = (typeof STATUSES)[number];
+const STATUSES: readonly string[] = PROJECT_STATUSES;
 const COLOR_RE = /^#[0-9a-f]{6}$/i;
 
-interface ProjectRow {
-  id: string;
+interface ProjectLean {
+  _id: string;
   code: string;
   name: string;
   client: string;
-  description: string;
-  manager_id: string;
-  start_date: string;
-  end_date: string;
+  description?: string;
+  managerId: string;
+  startDate: string;
+  endDate: string;
   status: ProjectStatus;
   billable: boolean;
   color: string;
-  created_at: Date;
+  createdAt: Date;
 }
 
-const PROJECT_COLUMNS = `id, code, name, client, description, manager_id,
-  to_char(start_date, 'YYYY-MM-DD') AS start_date, to_char(end_date, 'YYYY-MM-DD') AS end_date,
-  status, billable, color, created_at`;
-
-/** Database row → the Project shape the frontend expects (src/types/index.ts). */
-const toProject = (r: ProjectRow) => ({
-  id: r.id,
-  code: r.code,
-  name: r.name,
-  client: r.client,
-  description: r.description,
-  managerId: r.manager_id,
-  startDate: r.start_date,
-  endDate: r.end_date,
-  status: r.status,
-  billable: r.billable,
-  color: r.color,
-  createdAt: r.created_at.toISOString(),
+/** Stored document → the Project shape the frontend expects (src/types/index.ts). */
+const toProject = (d: ProjectLean) => ({
+  id: d._id,
+  code: d.code,
+  name: d.name,
+  client: d.client,
+  description: d.description ?? '',
+  managerId: d.managerId,
+  startDate: d.startDate,
+  endDate: d.endDate,
+  status: d.status,
+  billable: d.billable,
+  color: d.color,
+  createdAt: d.createdAt.toISOString(),
 });
 
 interface ProjectInput {
@@ -67,7 +68,7 @@ async function validateProject(orgId: string, body: unknown): Promise<ProjectInp
     managerId: str(b.managerId),
     startDate: str(b.startDate),
     endDate: str(b.endDate),
-    status: (STATUSES as readonly string[]).includes(str(b.status)) ? (str(b.status) as ProjectStatus) : 'active',
+    status: STATUSES.includes(str(b.status)) ? (str(b.status) as ProjectStatus) : 'active',
     billable: b.billable !== false,
     color: str(b.color),
   };
@@ -79,7 +80,7 @@ async function validateProject(orgId: string, body: unknown): Promise<ProjectInp
   if (!input.client) errors.client = 'Client is required.';
   else if (input.client.length > 150) errors.client = 'Use at most 150 characters.';
   if (input.description.length > 2000) errors.description = 'Use at most 2000 characters.';
-  if (b.status !== undefined && !(STATUSES as readonly string[]).includes(str(b.status))) errors.status = 'Select a valid status.';
+  if (b.status !== undefined && !STATUSES.includes(str(b.status))) errors.status = 'Select a valid status.';
   if (!COLOR_RE.test(input.color)) errors.color = 'Select a colour.';
   if (!isISODate(input.startDate)) errors.startDate = 'Enter a valid start date.';
   if (!isISODate(input.endDate)) errors.endDate = 'Enter a valid end date.';
@@ -88,12 +89,9 @@ async function validateProject(orgId: string, body: unknown): Promise<ProjectInp
   if (!input.managerId) errors.managerId = 'Project manager is required.';
   else {
     const mgr = isUuid(input.managerId)
-      ? await pool.query(
-          "SELECT 1 FROM employees WHERE organisation_id = $1 AND id = $2 AND status = 'active' AND system_role IN ('manager', 'admin')",
-          [orgId, input.managerId],
-        )
+      ? await EmployeeModel.exists({ organisationId: orgId, _id: input.managerId, status: 'active', systemRole: { $in: ['manager', 'admin'] } })
       : null;
-    if (!mgr?.rowCount) errors.managerId = 'Select an active project manager.';
+    if (!mgr) errors.managerId = 'Select an active project manager.';
   }
 
   assertValid(errors);
@@ -101,9 +99,9 @@ async function validateProject(orgId: string, body: unknown): Promise<ProjectInp
 }
 
 function duplicateError(err: unknown): unknown {
-  const constraint = uniqueViolation(err);
-  if (constraint === 'projects_code_key') return new HttpError(409, 'Duplicate project.', { code: 'This project code is already used.' });
-  if (constraint === 'projects_name_key') return new HttpError(409, 'Duplicate project.', { name: 'A project with this name already exists.' });
+  const index = uniqueViolation(err);
+  if (index === 'projects_code_key') return new HttpError(409, 'Duplicate project.', { code: 'This project code is already used.' });
+  if (index === 'projects_name_key') return new HttpError(409, 'Duplicate project.', { name: 'A project with this name already exists.' });
   return err;
 }
 
@@ -112,36 +110,28 @@ projectsRouter.use(requireAuth);
 
 /** GET /api/projects */
 projectsRouter.get('/', async (_req, res) => {
-  const { rows } = await pool.query<ProjectRow>(
-    `SELECT ${PROJECT_COLUMNS} FROM projects WHERE organisation_id = $1 ORDER BY lower(name)`,
-    [currentUser(res).organisationId],
-  );
-  res.json(rows.map(toProject));
+  const docs = await Project.find({ organisationId: currentUser(res).organisationId }).collation(CASE_INSENSITIVE).sort({ name: 1 }).lean<ProjectLean[]>();
+  res.json(docs.map(toProject));
 });
 
 /** GET /api/projects/:id */
 projectsRouter.get('/:id', async (req, res) => {
   const id = assertId(req.params.id, 'Project');
-  const { rows } = await pool.query<ProjectRow>(`SELECT ${PROJECT_COLUMNS} FROM projects WHERE organisation_id = $1 AND id = $2`, [
-    currentUser(res).organisationId,
-    id,
-  ]);
-  if (!rows[0]) throw new HttpError(404, 'Project not found.');
-  res.json(toProject(rows[0]));
+  const doc = await Project.findOne({ organisationId: currentUser(res).organisationId, _id: id }).lean<ProjectLean>();
+  if (!doc) throw new HttpError(404, 'Project not found.');
+  res.json(toProject(doc));
 });
 
 /** POST /api/projects */
 projectsRouter.post('/', requireRole('admin'), async (req, res) => {
   const org = currentUser(res).organisationId;
   const p = await validateProject(org, req.body);
-  const { rows } = await pool
-    .query<ProjectRow>(
-      `INSERT INTO projects (organisation_id, code, name, client, description, manager_id, start_date, end_date, status, billable, color)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING ${PROJECT_COLUMNS}`,
-      [org, p.code, p.name, p.client, p.description, p.managerId, p.startDate, p.endDate, p.status, p.billable, p.color],
-    )
-    .catch((err) => Promise.reject(duplicateError(err)));
-  res.status(201).json(toProject(rows[0]!));
+  try {
+    const doc = await Project.create({ organisationId: org, ...p });
+    res.status(201).json(toProject(doc.toObject() as unknown as ProjectLean));
+  } catch (err) {
+    throw duplicateError(err);
+  }
 });
 
 /** PUT /api/projects/:id */
@@ -149,45 +139,45 @@ projectsRouter.put('/:id', requireRole('admin'), async (req, res) => {
   const org = currentUser(res).organisationId;
   const id = assertId(req.params.id, 'Project');
   const p = await validateProject(org, req.body);
-  const { rows } = await pool
-    .query<ProjectRow>(
-      `UPDATE projects SET code = $3, name = $4, client = $5, description = $6, manager_id = $7, start_date = $8,
-         end_date = $9, status = $10, billable = $11, color = $12, updated_at = now()
-       WHERE organisation_id = $1 AND id = $2 RETURNING ${PROJECT_COLUMNS}`,
-      [org, id, p.code, p.name, p.client, p.description, p.managerId, p.startDate, p.endDate, p.status, p.billable, p.color],
-    )
-    .catch((err) => Promise.reject(duplicateError(err)));
-  if (!rows[0]) throw new HttpError(404, 'Project not found.');
-  res.json(toProject(rows[0]));
+  let doc: ProjectLean | null;
+  try {
+    doc = await Project.findOneAndUpdate({ organisationId: org, _id: id }, { $set: p }, { returnDocument: 'after', runValidators: true }).lean<ProjectLean>();
+  } catch (err) {
+    throw duplicateError(err);
+  }
+  if (!doc) throw new HttpError(404, 'Project not found.');
+  res.json(toProject(doc));
 });
 
 /** PATCH /api/projects/:id/status — activate / deactivate without editing other details. */
 projectsRouter.patch('/:id/status', requireRole('admin'), async (req, res) => {
   const id = assertId(req.params.id, 'Project');
   const status = str(req.body?.status);
-  if (!(STATUSES as readonly string[]).includes(status)) throw new HttpError(400, 'Select a valid status.', { status: 'Select a valid status.' });
-  const { rows } = await pool.query<ProjectRow>(
-    `UPDATE projects SET status = $3, updated_at = now() WHERE organisation_id = $1 AND id = $2 RETURNING ${PROJECT_COLUMNS}`,
-    [currentUser(res).organisationId, id, status],
-  );
-  if (!rows[0]) throw new HttpError(404, 'Project not found.');
-  res.json(toProject(rows[0]));
+  if (!STATUSES.includes(status)) throw new HttpError(400, 'Select a valid status.', { status: 'Select a valid status.' });
+  const doc = await Project.findOneAndUpdate({ organisationId: currentUser(res).organisationId, _id: id }, { $set: { status } }, { returnDocument: 'after' }).lean<ProjectLean>();
+  if (!doc) throw new HttpError(404, 'Project not found.');
+  res.json(toProject(doc));
 });
 
 /** DELETE /api/projects/:id */
 projectsRouter.delete('/:id', requireRole('admin'), async (req, res) => {
+  const org = currentUser(res).organisationId;
   const id = assertId(req.params.id, 'Project');
-  try {
-    const result = await pool.query('DELETE FROM projects WHERE organisation_id = $1 AND id = $2', [currentUser(res).organisationId, id]);
-    if (!result.rowCount) throw new HttpError(404, 'Project not found.');
-  } catch (err) {
-    // Once allocations / timesheets reference projects, deleting a used project is refused (deactivate it instead).
-    // 23503 = foreign_key_violation (NO ACTION), 23001 = restrict_violation (ON DELETE RESTRICT).
-    const code = (err as { code?: string }).code;
-    if (code === '23503' || code === '23001') {
+  await withTransaction(async (session) => {
+    // Locking the project first means a concurrent request cannot start referencing it while it is being removed.
+    if (!(await lockDoc(Project, { organisationId: org, _id: id }, session))) throw new HttpError(404, 'Project not found.');
+    // MongoDB has no foreign keys, so the references a relational database would have enforced are checked here:
+    // a project that is used anywhere is kept (deactivate it instead).
+    // (Checked one after another: a session cannot run operations in parallel inside a transaction.)
+    const used =
+      (await AllocationModel.exists({ projectId: id }).session(session)) ||
+      (await TimesheetModel.exists({ 'entries.projectId': id }).session(session)) ||
+      (await TimesheetEvent.exists({ projectId: id }).session(session)) ||
+      (await OvertimeRequestModel.exists({ projectId: id }).session(session));
+    if (used) {
       throw new HttpError(409, 'This project has allocations or timesheet records and cannot be deleted. Deactivate it instead.');
     }
-    throw err;
-  }
+    await Project.deleteOne({ _id: id }).session(session);
+  });
   res.status(204).end();
 });

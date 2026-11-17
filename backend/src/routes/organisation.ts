@@ -1,6 +1,9 @@
 /** Reference data (lookups), organisation settings and overtime policy. */
 import { Router } from 'express';
-import { pool } from '../db.js';
+import { CASE_INSENSITIVE, type Country } from '../models/common.js';
+import { Calendar } from '../models/calendar.js';
+import { EmployeeModel } from '../models/employee.js';
+import { Department, Organisation, WorkLocation } from '../models/organisation.js';
 import { currentUser, requireAuth, requireRole } from '../auth.js';
 import { HttpError, assertId, assertValid, isUuid, str, uniqueViolation } from '../http.js';
 
@@ -66,16 +69,22 @@ organisationRouter.use(['/lookups', '/settings', '/policies'], requireAuth);
 
 // ------------------------------------------------------------------ lookups
 
+interface LocationLean {
+  _id: string;
+  name: string;
+  country: string;
+  defaultCalendarId?: string | null;
+}
+const toLocation = (l: LocationLean) => ({ id: l._id, name: l.name, country: l.country, defaultCalendarId: l.defaultCalendarId ?? null });
+const toDepartment = (d: { _id: string; name: string }) => ({ id: d._id, name: d.name });
+
 organisationRouter.get('/lookups', async (_req, res) => {
   const org = currentUser(res).organisationId;
   const [deps, locs] = await Promise.all([
-    pool.query('SELECT id, name FROM departments WHERE organisation_id = $1 ORDER BY lower(name)', [org]),
-    pool.query(
-      `SELECT id, name, country, default_calendar_id AS "defaultCalendarId" FROM work_locations WHERE organisation_id = $1 ORDER BY lower(name)`,
-      [org],
-    ),
+    Department.find({ organisationId: org }).collation(CASE_INSENSITIVE).sort({ name: 1 }).lean<Array<{ _id: string; name: string }>>(),
+    WorkLocation.find({ organisationId: org }).collation(CASE_INSENSITIVE).sort({ name: 1 }).lean<LocationLean[]>(),
   ]);
-  res.json({ departments: deps.rows, workLocations: locs.rows, ...ENUMS });
+  res.json({ departments: deps.map(toDepartment), workLocations: locs.map(toLocation), ...ENUMS });
 });
 
 organisationRouter.post('/lookups/departments', requireRole('admin'), async (req, res) => {
@@ -83,10 +92,10 @@ organisationRouter.post('/lookups/departments', requireRole('admin'), async (req
   if (!name) throw new HttpError(400, 'Please correct the highlighted fields.', { name: 'Department name is required.' });
   if (name.length > 100) throw new HttpError(400, 'Please correct the highlighted fields.', { name: 'Use at most 100 characters.' });
   try {
-    const { rows } = await pool.query('INSERT INTO departments (organisation_id, name) VALUES ($1, $2) RETURNING id, name', [currentUser(res).organisationId, name]);
-    res.status(201).json(rows[0]);
+    const doc = await Department.create({ organisationId: currentUser(res).organisationId, name });
+    res.status(201).json(toDepartment(doc));
   } catch (err) {
-    if (uniqueViolation(err)) throw new HttpError(409, 'Duplicate department.', { name: 'This department already exists.' });
+    if (uniqueViolation(err) !== null) throw new HttpError(409, 'Duplicate department.', { name: 'This department already exists.' });
     throw err;
   }
 });
@@ -94,12 +103,11 @@ organisationRouter.post('/lookups/departments', requireRole('admin'), async (req
 organisationRouter.delete('/lookups/departments/:id', requireRole('admin'), async (req, res) => {
   const org = currentUser(res).organisationId;
   const id = assertId(req.params.id, 'Department');
-  const dep = await pool.query<{ name: string }>('SELECT name FROM departments WHERE organisation_id = $1 AND id = $2', [org, id]);
-  const name = dep.rows[0]?.name;
-  if (!name) throw new HttpError(404, 'Department not found.');
-  const used = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM employees WHERE organisation_id = $1 AND department = $2', [org, name]);
-  if (used.rows[0]?.n) throw new HttpError(409, `${name} is assigned to ${used.rows[0].n} employee(s) and cannot be removed.`);
-  await pool.query('DELETE FROM departments WHERE id = $1', [id]);
+  const dep = await Department.findOne({ organisationId: org, _id: id }).lean<{ name: string }>();
+  if (!dep) throw new HttpError(404, 'Department not found.');
+  const used = await EmployeeModel.countDocuments({ organisationId: org, department: dep.name });
+  if (used) throw new HttpError(409, `${dep.name} is assigned to ${used} employee(s) and cannot be removed.`);
+  await Department.deleteOne({ _id: id });
   res.status(204).end();
 });
 
@@ -113,26 +121,21 @@ async function validateLocation(org: string, body: unknown, requireName: boolean
   else if (name.length > 100) errors.name = 'Use at most 100 characters.';
   if (!COUNTRIES.has(country)) errors.country = 'Select a country.';
   if (defaultCalendarId) {
-    const cal = isUuid(defaultCalendarId) ? await pool.query('SELECT 1 FROM calendars WHERE organisation_id = $1 AND id = $2', [org, defaultCalendarId]) : null;
-    if (!cal?.rowCount) errors.defaultCalendarId = 'Unknown calendar.';
+    const cal = isUuid(defaultCalendarId) ? await Calendar.exists({ organisationId: org, _id: defaultCalendarId }) : null;
+    if (!cal) errors.defaultCalendarId = 'Unknown calendar.';
   }
   assertValid(errors);
-  return { name, country, defaultCalendarId };
+  return { name, country: country as Country, defaultCalendarId };
 }
-
-const LOCATION_COLUMNS = 'id, name, country, default_calendar_id AS "defaultCalendarId"';
 
 organisationRouter.post('/lookups/work-locations', requireRole('admin'), async (req, res) => {
   const org = currentUser(res).organisationId;
   const loc = await validateLocation(org, req.body, true);
   try {
-    const { rows } = await pool.query(
-      `INSERT INTO work_locations (organisation_id, name, country, default_calendar_id) VALUES ($1, $2, $3, $4) RETURNING ${LOCATION_COLUMNS}`,
-      [org, loc.name, loc.country, loc.defaultCalendarId],
-    );
-    res.status(201).json(rows[0]);
+    const doc = await WorkLocation.create({ organisationId: org, ...loc });
+    res.status(201).json(toLocation(doc.toObject() as unknown as LocationLean));
   } catch (err) {
-    if (uniqueViolation(err)) throw new HttpError(409, 'Duplicate location.', { name: 'This location already exists.' });
+    if (uniqueViolation(err) !== null) throw new HttpError(409, 'Duplicate location.', { name: 'This location already exists.' });
     throw err;
   }
 });
@@ -142,23 +145,23 @@ organisationRouter.put('/lookups/work-locations/:id', requireRole('admin'), asyn
   const org = currentUser(res).organisationId;
   const id = assertId(req.params.id, 'Work location');
   const loc = await validateLocation(org, req.body, false);
-  const { rows } = await pool.query(
-    `UPDATE work_locations SET country = $3, default_calendar_id = $4 WHERE organisation_id = $1 AND id = $2 RETURNING ${LOCATION_COLUMNS}`,
-    [org, id, loc.country, loc.defaultCalendarId],
-  );
-  if (!rows[0]) throw new HttpError(404, 'Work location not found.');
-  res.json(rows[0]);
+  const doc = await WorkLocation.findOneAndUpdate(
+    { organisationId: org, _id: id },
+    { $set: { country: loc.country, defaultCalendarId: loc.defaultCalendarId } },
+    { returnDocument: 'after', runValidators: true },
+  ).lean<LocationLean>();
+  if (!doc) throw new HttpError(404, 'Work location not found.');
+  res.json(toLocation(doc));
 });
 
 organisationRouter.delete('/lookups/work-locations/:id', requireRole('admin'), async (req, res) => {
   const org = currentUser(res).organisationId;
   const id = assertId(req.params.id, 'Work location');
-  const loc = await pool.query<{ name: string }>('SELECT name FROM work_locations WHERE organisation_id = $1 AND id = $2', [org, id]);
-  const name = loc.rows[0]?.name;
-  if (!name) throw new HttpError(404, 'Work location not found.');
-  const used = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM employees WHERE organisation_id = $1 AND work_location = $2', [org, name]);
-  if (used.rows[0]?.n) throw new HttpError(409, `${name} is assigned to ${used.rows[0].n} employee(s) and cannot be removed.`);
-  await pool.query('DELETE FROM work_locations WHERE id = $1', [id]);
+  const loc = await WorkLocation.findOne({ organisationId: org, _id: id }).lean<{ name: string }>();
+  if (!loc) throw new HttpError(404, 'Work location not found.');
+  const used = await EmployeeModel.countDocuments({ organisationId: org, workLocation: loc.name });
+  if (used) throw new HttpError(409, `${loc.name} is assigned to ${used} employee(s) and cannot be removed.`);
+  await WorkLocation.deleteOne({ _id: id });
   res.status(204).end();
 });
 
@@ -168,10 +171,9 @@ export type OrgSettings = typeof DEFAULT_SETTINGS & { organisationName: string }
 export type OvertimePolicy = typeof DEFAULT_POLICY;
 
 export async function readSettings(org: string): Promise<OrgSettings> {
-  const { rows } = await pool.query<{ name: string; settings: Record<string, unknown> }>('SELECT name, settings FROM organisations WHERE id = $1', [org]);
-  const row = rows[0];
+  const row = await Organisation.findById(org).select('name settings').lean<{ name: string; settings?: Record<string, unknown> }>();
   if (!row) throw new HttpError(404, 'Organisation not found.');
-  return { organisationName: row.name, ...DEFAULT_SETTINGS, ...row.settings } as OrgSettings;
+  return { organisationName: row.name, ...DEFAULT_SETTINGS, ...(row.settings ?? {}) } as OrgSettings;
 }
 
 organisationRouter.get('/settings', async (_req, res) => {
@@ -200,9 +202,9 @@ organisationRouter.put('/settings', requireRole('admin'), async (req, res) => {
   if (settings.submissionDeadline.length > 50) errors.submissionDeadline = 'Use at most 50 characters.';
   assertValid(errors);
   try {
-    await pool.query('UPDATE organisations SET name = $2, settings = $3 WHERE id = $1', [org, organisationName, settings]);
+    await Organisation.updateOne({ _id: org }, { $set: { name: organisationName, settings } }, { runValidators: true });
   } catch (err) {
-    if (uniqueViolation(err)) throw new HttpError(409, 'This organisation name is already in use.', { organisationName: 'This organisation name is already in use.' });
+    if (uniqueViolation(err) !== null) throw new HttpError(409, 'This organisation name is already in use.', { organisationName: 'This organisation name is already in use.' });
     throw err;
   }
   res.json(await readSettings(org));
@@ -211,9 +213,9 @@ organisationRouter.put('/settings', requireRole('admin'), async (req, res) => {
 // ---------------------------------------------------------- overtime policy
 
 export async function readPolicy(org: string): Promise<OvertimePolicy> {
-  const { rows } = await pool.query<{ overtime_policy: Record<string, unknown> }>('SELECT overtime_policy FROM organisations WHERE id = $1', [org]);
-  if (!rows[0]) throw new HttpError(404, 'Organisation not found.');
-  return { ...DEFAULT_POLICY, ...rows[0].overtime_policy } as OvertimePolicy;
+  const row = await Organisation.findById(org).select('overtimePolicy').lean<{ overtimePolicy?: Record<string, unknown> }>();
+  if (!row) throw new HttpError(404, 'Organisation not found.');
+  return { ...DEFAULT_POLICY, ...(row.overtimePolicy ?? {}) } as OvertimePolicy;
 }
 
 organisationRouter.get('/policies/overtime', async (_req, res) => {
@@ -244,6 +246,6 @@ organisationRouter.put('/policies/overtime', requireRole('admin'), async (req, r
   if (!(policy.maxWeeklyOvertime >= 0 && policy.maxWeeklyOvertime <= 60)) errors.maxWeeklyOvertime = 'Enter between 0 and 60 hours.';
   if (!APPROVERS.has(policy.approver)) errors.approver = 'Select an approver.';
   if (Object.keys(errors).length) throw new HttpError(400, 'Please correct the highlighted policy values.', errors);
-  await pool.query('UPDATE organisations SET overtime_policy = $2 WHERE id = $1', [org, policy]);
+  await Organisation.updateOne({ _id: org }, { $set: { overtimePolicy: policy } });
   res.json(await readPolicy(org));
 });
