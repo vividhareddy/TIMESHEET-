@@ -1,6 +1,10 @@
 import { config } from './config.js';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import cors from 'cors';
+import path from 'node:path';
+import fs from 'node:fs/promises';
+import http from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { checkDatabaseConnection, checkDatabaseWrite, connectMongo, describeMongoError, disconnectMongo, getDbIdentity, isDbUnavailable, isMongoConnected } from './mongo.js';
 import { HttpError } from './http.js';
 import { ensureMongoSchema } from './mongoSchema.js';
@@ -59,26 +63,52 @@ app.use('/api', (_req: Request, res: Response) => {
   res.status(404).json({ message: 'Not found' });
 });
 
-// Express 5 forwards errors from async handlers here. Responses use the { message, fieldErrors? } shape the frontend expects.
-app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-  if (err instanceof HttpError) {
-    res.status(err.status).json({ message: err.message, ...(err.fieldErrors ? { fieldErrors: err.fieldErrors } : {}) });
+// Everything that isn't an /api/* request falls through to the React app below.
+const NOT_API = /^(?!\/api).*/;
+const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../frontend');
+
+/**
+ * Serves the React frontend from this same Express process/port.
+ * Dev: Vite runs in middleware mode (no separate Vite server/port — see https://vite.dev/guide/ssr#setting-up-the-dev-server).
+ * Production: the prebuilt `frontend/dist` is served as static files, with an SPA fallback to index.html.
+ *
+ * `httpServer` is the one real HTTP server (created in main(), listening on PORT): Vite's HMR websocket
+ * attaches to it instead of opening a server/port of its own (which would default to 5173).
+ */
+async function setupFrontend(httpServer: http.Server): Promise<void> {
+  if (process.env.NODE_ENV === 'production') {
+    const distDir = path.join(frontendRoot, 'dist');
+    app.use(express.static(distDir));
+    app.use(NOT_API, (_req: Request, res: Response) => {
+      res.sendFile(path.join(distDir, 'index.html'));
+    });
     return;
   }
-  // Malformed JSON body and other client errors raised by Express middleware.
-  const status = (err as { status?: unknown })?.status;
-  if (typeof status === 'number' && status >= 400 && status < 500) {
-    res.status(status).json({ message: status === 400 ? 'The request body is not valid JSON.' : 'Bad request.' });
-    return;
-  }
-  if (isDbUnavailable(err)) {
-    console.error(`[db] ${describeMongoError(err)}`);
-    res.status(503).json({ message: 'The database is unavailable. Please try again shortly.' });
-    return;
-  }
-  console.error('[api] Unhandled error:', err);
-  res.status(500).json({ message: 'Something went wrong on the server. Please try again.' });
-});
+
+  // Config is passed inline (mirroring frontend/vite.config.ts) rather than via `configFile`: loading an
+  // external .ts config makes Vite write a transformed temp file next to it, which `tsx watch` then picks
+  // up as a source change and restarts on, looping forever.
+  const { createServer: createViteServer } = await import('vite');
+  const react = (await import('@vitejs/plugin-react')).default;
+  const vite = await createViteServer({
+    root: frontendRoot,
+    configFile: false,
+    plugins: [react()],
+    resolve: { alias: { '@': path.join(frontendRoot, 'src') } },
+    server: { middlewareMode: true, hmr: { server: httpServer } },
+    appType: 'custom',
+  });
+  app.use(vite.middlewares);
+  app.use(NOT_API, async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const template = await fs.readFile(path.join(frontendRoot, 'index.html'), 'utf-8');
+      const html = await vite.transformIndexHtml(req.originalUrl, template);
+      res.status(200).set({ 'Content-Type': 'text/html' }).end(html);
+    } catch (err) {
+      next(err);
+    }
+  });
+}
 
 const RETRY_MS = 15_000;
 let retryTimer: NodeJS.Timeout | undefined;
@@ -115,9 +145,47 @@ export async function startDatabase(throwOnFailure = false): Promise<void> {
   }
 }
 
-// Tests import the app and start the database themselves.
-if (process.env.TIMESHEET_NO_LISTEN !== '1') {
-  const server = app.listen(PORT, () => {
+// Express 5 forwards errors from async handlers here. Registered after the frontend middleware (when
+// there is any), since Express only looks forward through the stack for an error handler when next(err)
+// is called. Responses use the { message, fieldErrors? } shape the frontend expects.
+function attachErrorHandler(): void {
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (err instanceof HttpError) {
+      res.status(err.status).json({ message: err.message, ...(err.fieldErrors ? { fieldErrors: err.fieldErrors } : {}) });
+      return;
+    }
+    // Malformed JSON body and other client errors raised by Express middleware.
+    const status = (err as { status?: unknown })?.status;
+    if (typeof status === 'number' && status >= 400 && status < 500) {
+      res.status(status).json({ message: status === 400 ? 'The request body is not valid JSON.' : 'Bad request.' });
+      return;
+    }
+    if (isDbUnavailable(err)) {
+      console.error(`[db] ${describeMongoError(err)}`);
+      res.status(503).json({ message: 'The database is unavailable. Please try again shortly.' });
+      return;
+    }
+    console.error('[api] Unhandled error:', err);
+    res.status(500).json({ message: 'Something went wrong on the server. Please try again.' });
+  });
+}
+
+// Tests import the app and start the database themselves, without serving the frontend or listening.
+const shouldListen = process.env.TIMESHEET_NO_LISTEN !== '1';
+
+async function main(): Promise<void> {
+  if (!shouldListen) {
+    attachErrorHandler();
+    return;
+  }
+
+  // Created before listening so Vite's HMR websocket (dev only) can attach to this same server/port
+  // instead of opening one of its own.
+  const server = http.createServer(app);
+  await setupFrontend(server);
+  attachErrorHandler();
+
+  server.listen(PORT, () => {
     console.log(`[api] Server listening on http://localhost:${PORT} (CORS origin: ${CORS_ORIGIN})`);
     void startDatabase();
   });
@@ -140,3 +208,5 @@ if (process.env.TIMESHEET_NO_LISTEN !== '1') {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
+
+void main();
