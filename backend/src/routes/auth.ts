@@ -1,5 +1,8 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { Router } from 'express';
 import bcrypt from 'bcrypt';
+import { config } from '../config.js';
+import { KekaSignInError, kekaAuthorizeUrl, kekaSsoReady, kekaVerifiedEmail } from '../keka.js';
 import { withTransaction } from '../mongo.js';
 import { currentUser, requireAuth, revokeToken, signToken } from '../auth.js';
 import { EMAIL_RE, HttpError, assertValid, passwordProblem, str, uniqueViolation } from '../http.js';
@@ -83,7 +86,80 @@ export const authRouter = Router();
 
 /** GET /api/auth/setup-status — true until the organisation and first administrator exist. */
 authRouter.get('/setup-status', async (_req, res) => {
-  res.json({ needsSetup: !(await Organisation.exists({})) });
+  res.json({ needsSetup: !(await Organisation.exists({})), kekaSignIn: kekaSsoReady() });
+});
+
+// ------------------------------------------------------- Sign in with Keka
+
+const KEKA_COOKIE = 'ts_keka_state';
+const KEKA_COOKIE_PATH = '/api/auth/keka';
+/** One-time codes handed to the frontend after a Keka sign-in, exchanged for the JWT within a minute. */
+const kekaCodes = new Map<string, { token: string; expiresAt: string; employeeId: string; until: number }>();
+
+function kekaStateCookie(value: string, maxAgeSeconds: number): string {
+  const secure = config.publicUrls.api.startsWith('https://') ? '; Secure' : '';
+  return `${KEKA_COOKIE}=${value}; Path=${KEKA_COOKIE_PATH}; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure}`;
+}
+
+function cookieValue(header: string | undefined, name: string): string {
+  for (const part of (header ?? '').split(';')) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === name) return rest.join('=');
+  }
+  return '';
+}
+
+const backToLogin = (query: Record<string, string>) => `${config.publicUrls.app}/?${new URLSearchParams(query)}`;
+
+/** GET /api/auth/keka/start — sends the browser to Keka's sign-in page. */
+authRouter.get('/keka/start', (_req, res) => {
+  if (!kekaSsoReady()) return res.redirect(302, backToLogin({ signin_error: 'keka-not-configured' }));
+  const state = randomBytes(24).toString('base64url');
+  res.setHeader('Set-Cookie', kekaStateCookie(state, 600));
+  res.setHeader('Cache-Control', 'no-store');
+  res.redirect(302, kekaAuthorizeUrl(state, randomBytes(24).toString('base64url')));
+});
+
+/** GET /api/auth/keka/callback — Keka returns here; the matching active employee is signed in. */
+authRouter.get('/keka/callback', async (req, res) => {
+  res.setHeader('Set-Cookie', kekaStateCookie('', 0));
+  res.setHeader('Cache-Control', 'no-store');
+  const query = req.query as Record<string, unknown>;
+  try {
+    if (query.error) throw new KekaSignInError('keka-cancelled');
+    const expected = cookieValue(req.headers.cookie, KEKA_COOKIE);
+    const state = typeof query.state === 'string' ? query.state : '';
+    const matches = !!expected && state.length === expected.length && timingSafeEqual(Buffer.from(state), Buffer.from(expected));
+    if (!matches) throw new KekaSignInError('keka-expired');
+    const email = await kekaVerifiedEmail(typeof query.code === 'string' ? query.code : '');
+    // Keka confirms who the person is; the timesheet account (created by the administrator) decides what they can do.
+    const row = await EmployeeModel.findOne({ email }).lean<EmployeeLean>();
+    if (!row) throw new KekaSignInError('keka-not-employee');
+    if (row.status !== 'active') throw new KekaSignInError('keka-inactive');
+    await EmployeeModel.updateOne({ _id: row._id }, { $set: { lastLoginAt: new Date() } }, { timestamps: false });
+    const { token, expiresAt } = signToken(row._id, false);
+    const code = randomBytes(32).toString('base64url');
+    const now = Date.now();
+    for (const [key, entry] of kekaCodes) if (entry.until < now) kekaCodes.delete(key);
+    kekaCodes.set(code, { token, expiresAt, employeeId: row._id, until: now + 60_000 });
+    res.redirect(302, backToLogin({ keka_code: code }));
+  } catch (err) {
+    const code = err instanceof KekaSignInError ? err.code : 'keka-failed';
+    if (!(err instanceof KekaSignInError)) console.error('[auth] Keka sign-in failed:', err);
+    res.redirect(302, backToLogin({ signin_error: code }));
+  }
+});
+
+/** POST /api/auth/keka/exchange — { code } → { token, expiresAt, user }. Each code works once, for one minute. */
+authRouter.post('/keka/exchange', async (req, res) => {
+  const code = str(req.body?.code);
+  const entry = code ? kekaCodes.get(code) : undefined;
+  if (code) kekaCodes.delete(code);
+  if (!entry || entry.until < Date.now()) throw new HttpError(401, 'Your Keka sign-in has expired. Please sign in again.');
+  const row = await EmployeeModel.findById(entry.employeeId).lean<EmployeeLean>();
+  if (!row) throw new HttpError(401, 'Your Keka sign-in has expired. Please sign in again.');
+  if (row.status !== 'active') throw new HttpError(403, 'Your account is inactive. Contact your administrator.');
+  res.json({ token: entry.token, expiresAt: entry.expiresAt, user: employeeFromDoc(row) });
 });
 
 /**

@@ -14,6 +14,7 @@ import { employeesRouter } from './routes/employees.js';
 import { organisationRouter } from './routes/organisation.js';
 import { calendarsRouter } from './routes/calendars.js';
 import { projectsRouter } from './routes/projects.js';
+import { lmsRouter } from './routes/lms.js';
 
 const PORT = config.port;
 const CORS_ORIGIN = config.corsOrigin;
@@ -52,6 +53,7 @@ app.use('/api/approvals', approvalsRouter);
 app.use('/api/leave-requests', leaveRouter);
 app.use('/api/overtime-requests', overtimeRouter);
 app.use('/api/reports', reportsRouter);
+app.use('/api/lms', lmsRouter);
 
 app.use('/api', (_req: Request, res: Response) => {
   res.status(404).json({ message: 'Not found' });

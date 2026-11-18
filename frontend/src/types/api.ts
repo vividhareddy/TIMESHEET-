@@ -49,6 +49,8 @@ export interface AuthResponse {
 export interface SetupStatusResponse {
   /** True when the database has no users yet and the first administrator must be created. */
   needsSetup: boolean;
+  /** True when "Sign in with Keka account" is configured on the server. */
+  kekaSignIn?: boolean;
 }
 
 export interface SetupRequest {

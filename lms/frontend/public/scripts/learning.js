@@ -1,0 +1,261 @@
+// Course UI backed by authenticated SQLite API records.
+let courseSets = [];
+const emptyLearning = () => ({ version: 3, run: { id: null, runNumber: 1, videos: {}, exercises: {}, attempts: [[], [], []], completedAt: null }, certificates: [] });
+let learning = emptyLearning();
+let selectedSet = 0, selectedActivity = 'overview', activeExam = null, exerciseFeedback = null, examNotice = '';
+let selectedAwardId=null;
+let selectedCheckpointId=null;
+let examStarting = false, examFinishing = false, interruptedStart = '';
+const videoDone = i => learning.run.videos[i]?.complete === true;
+const exerciseDone = (s, e) => learning.run.exercises[`${s}-${e}`] === true;
+const examPassed = s => learning.run.attempts[s].some(a => a.status === 'passed');
+const setReady = s => courseSets[s].videos.every(videoDone) && [0, 1].every(e => exerciseDone(s, e));
+const setDone = s => setReady(s) && examPassed(s);
+const setUnlocked = s => s === 0 || setDone(s - 1);
+const maxAttempts = () => currentCourseInfo.maxAttempts || 3, passMark = () => currentCourseInfo.passPercent || 75, passCount = () => Math.ceil(passMark() / 25);
+function courseProgress() { if (learning.run.format === 'lessons') { const checkpoints=learning.run.checkpoints||[],total=(learning.run.lessonTotal||0)+checkpoints.length; return total ? Math.round((Object.keys(learning.run.lessons||{}).length+checkpoints.filter(c=>c.passed).length)/total*100) : 0; } let count = 0; courseSets.forEach((set, s) => { count += set.videos.filter(videoDone).length + [0, 1].filter(e => exerciseDone(s, e)).length + Number(examPassed(s)); }); return Math.round(count / 15 * 100); }
+function syncLearning() { state.completed = lessons.map((_, i) => i).filter(videoDone); }
+function questionFields(questions, prefix, answers = {}) { return questions.map((q, i) => `<fieldset class="question"><legend><span>${i + 1}.</span> ${esc(q[0])}</legend>${q[1].map((option, j) => `<label class="answer"><input type="radio" name="${prefix}${i}" value="${j}" required ${answers[i] === j ? 'checked' : ''}><span>${esc(option)}</span></label>`).join('')}</fieldset>`).join(''); }
+function readAnswers(form, questions, prefix) { return questions.map((_, i) => { const value = new FormData(form).get(prefix + i); return value === null ? null : Number(value); }); }
+function setNavigation() { return `<aside class="panel curriculum"><h3>Course curriculum</h3><p class="muted">3 modules · 6 videos · 6 exercises · 3 exams</p>${courseSets.map((set, s) => `<section class="curriculum-set"><button class="set-heading ${s === selectedSet ? 'selected' : ''}" data-set="${s}" ${!setUnlocked(s) ? 'disabled' : ''}><span>MODULE ${s + 1}</span><strong>${esc(set.title)}</strong><small>${setDone(s) ? 'Completed ✓' : !setUnlocked(s) ? 'Complete the previous module to unlock' : 'Available'}</small></button>${s === selectedSet && setUnlocked(s) ? `<button class="lesson-item ${selectedActivity === 'overview' ? 'selected' : ''}" data-activity="overview">Overview</button>${set.videos.map(i => `<button class="lesson-item ${selectedActivity === 'video-' + i ? 'selected' : ''}" data-activity="video-${i}">${videoDone(i) ? '✓' : '▷'} Video: ${esc(lessons[i].title)}</button>`).join('')}${set.exercises.map((e, i) => `<button class="lesson-item ${selectedActivity === 'exercise-' + i ? 'selected' : ''}" data-activity="exercise-${i}">${exerciseDone(s, i) ? '✓' : '✎'} Exercise ${i + 1}: ${esc(e.title)}</button>`).join('')}<button class="lesson-item ${selectedActivity === 'exam' ? 'selected' : ''}" data-activity="exam">${examPassed(s) ? '✓' : '▤'} Module ${s + 1} exam · ${learning.run.attempts[s].length}/${maxAttempts()} attempts</button>` : ''}</section>`).join('')}<div class="progress-label"><span>Course progress</span><b>${pct()}%</b></div><div class="progress"><span style="width:${pct()}%"></span></div></aside>`; }
+function overviewPanel() { const set = courseSets[selectedSet]; return `<article class="panel lesson-content"><span class="tag">MODULE ${selectedSet + 1} OF 3</span><h2>${esc(set.title)}</h2><p>${esc(set.summary)} Watch both video walkthroughs, complete both practice exercises, then pass the set exam.</p><div class="set-checklist"><div><b>01 · Watch</b><p>2 short video walkthroughs with code examples. Watch to the end to record completion.</p></div><div><b>02 · Practice</b><p>2 exercises, with feedback and unlimited retries. Answer both questions correctly in each exercise.</p></div><div><b>03 · Demonstrate</b><p>4 exam questions based on the exercises. Pass with at least ${passCount()} correct answer${passCount() === 1 ? '' : 's'} (${passMark()}%). Maximum ${maxAttempts()} attempt${maxAttempts() === 1 ? '' : 's'} per module, per course run.</p></div></div><button class="btn" data-activity="video-${set.videos[0]}">Watch first video ${icon('play')}</button></article>`; }
+function videoPanel(i) { const l = lessons[i]; return `<article class="panel lesson-content"><span class="tag">VIDEO WALKTHROUGH</span><h2>${esc(l.title)}</h2><p>${esc(l.body)}</p><video class="course-video" id="course-video" controls playsinline preload="metadata" controlslist="nodownload" aria-label="${esc(l.title)} video"><source src="${esc(l.src)}">${l.captions?`<track kind="captions" src="${esc(l.captions)}" srclang="en" label="English">`:""}Your browser does not support this video. Read the transcript below.</video><div class="video-status" id="video-status">${videoDone(i) ? '✓ Video completed. You can watch it again anytime.' : 'Watch the full walkthrough to complete this video. Seeking ahead does not count.'}</div><p class="muted">Silent code walkthrough · English captions and transcript available.</p><details class="transcript"><summary>Video transcript & code</summary><p>${esc(l.body)}</p><pre><code>${esc(l.code)}</code></pre><p>${esc(l.task)}</p></details><button class="btn secondary" data-activity="${i === courseSets[selectedSet].videos[0] ? 'video-' + courseSets[selectedSet].videos[1] : 'exercise-0'}">Continue ${icon('arrow')}</button></article>`; }
+function exercisePanel(e) { const exercise = courseSets[selectedSet].exercises[e]; const feedback = exerciseFeedback; return `<article class="panel lesson-content"><span class="tag">EXERCISE ${e + 1} · UNLIMITED RETRIES</span><h2>${esc(exercise.title)}</h2><p>Practice what you learned. Answer both questions correctly to complete this exercise. You can retry or revisit it anytime.</p>${exerciseDone(selectedSet, e) ? '<p class="notice success">✓ Exercise completed. Additional practice won’t erase your completion.</p>' : ''}${feedback ? `<div class="notice ${feedback.score === 2 ? 'success' : ''}" role="status"><strong>${feedback.score}/2 correct. ${feedback.score === 2 ? 'Exercise complete!' : 'Review the feedback and try again.'}</strong>${exercise.questions.map((q, i) => `<p>${i + 1}. ${feedback.details[i].correct ? 'Correct.' : 'Try again.'} ${esc(feedback.details[i].explanation)}</p>`).join('')}</div>` : ''}<form id="exercise-form" data-exercise="${e}">${questionFields(exercise.questions, 'practice-', feedback?.answers)}<button class="btn" type="submit">Check answers ${icon('check')}</button></form></article>`; }
+function examPanel() { const s = selectedSet, attempts = learning.run.attempts[s], remaining = maxAttempts() - attempts.length; return `<article class="panel lesson-content"><span class="tag">MODULE ${s + 1} ASSESSMENT</span><h2>${esc(courseSets[s].title)} exam</h2><p>Four questions covering this module’s two exercises. Score at least ${passMark()}% (${passCount()} out of 4) to pass.</p>${examNotice ? `<div class="notice" role="alert">${esc(examNotice)}</div>` : ''}${examPassed(s) ? '<div class="notice success">✓ Exam passed. This module is complete.</div>' : ''}<div class="exam-rules"><h3>Before you begin</h3><ul><li>10 minutes · 4 questions · ${maxAttempts()} attempt${maxAttempts() === 1 ? '' : 's'} per module in this course run.</li><li>Starting an exam uses one attempt, including failed or terminated attempts.</li>${EXAM_RULE_ITEMS}<li>Stay in this tab until you submit. Close popups and other distractions before starting.</li></ul></div><p><b>${Math.max(0, remaining)} of ${maxAttempts()} attempts remaining</b></p>${!setReady(s) ? '<p class="notice">Complete both videos and both exercises in this module to unlock the exam.</p>' : !examPassed(s) && remaining > 0 ? '<button class="btn" id="start-exam">I understand — start exam</button>' : ''}${examPassed(s) && s < 2 ? `<button class="btn" data-set="${s + 1}">Continue to module ${s + 2} ${icon('arrow')}</button>` : ''}${examPassed(s) && s === 2 ? '<a class="btn" href="#certificates">View certificate →</a>' : ''}${remaining === 0 && !examPassed(s) ? '<p class="notice">All ${maxAttempts()} attempts have been used. Continue practicing, or start a new course run to rewatch the videos, redo the exercises, and receive fresh exam attempts.</p>' : ''}<h3 style="margin-top:28px">Attempt history</h3>${attempts.length ? `<ol class="attempt-history">${attempts.map(a => `<li><strong>${a.status === 'passed' ? 'Passed' : a.status === 'failed' ? 'Not passed' : 'Terminated'}</strong> · ${a.score == null ? esc(a.reason || '') : `${a.score}/4 (${a.score * 25}%)`}<small>${esc(new Date(a.startedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }))}</small></li>`).join('')}</ol>` : '<p>No attempts yet.</p>'}</article>`; }
+lesson = function() { if(typeof inlineAttempt!=='undefined'&&inlineAttempt)return inlineExamPanel(); if(currentCourseInfo.id&&currentCourseInfo.format==='lessons'&&!activeExam)return lessonCoursePlayer(); if(!currentCourseInfo.id)return `<div class="panel"><h2>Choose a course to begin</h2><a class="btn" href="#catalog">Browse courses</a></div>`; if (activeExam) return activeExamPanel(); if (!setUnlocked(selectedSet)) { selectedSet = 0; selectedActivity = 'overview'; } let panel = overviewPanel(); if (selectedActivity.startsWith('video-')) panel = videoPanel(Number(selectedActivity.split('-')[1])); else if (selectedActivity.startsWith('exercise-')) panel = exercisePanel(Number(selectedActivity.split('-')[1])); else if (selectedActivity === 'exam') panel = examPanel(); return `<div class="intro"><div><div class="eyebrow">${esc(currentCourseInfo.title)}</div><h1>Learn. Practice. Achieve.</h1><p>Course run ${learning.run.runNumber} · Three modules · ${esc(capital(currentCourseInfo.difficulty || 'beginner'))} · ${esc(fmtDuration(currentCourseInfo.durationMinutes))}.</p></div><button class="btn secondary" id="restart-course">Start new course run</button></div><div id="restart-confirm" class="notice hidden"><p>Start again from Module 1? This resets current video and exercise progress and all exam attempts. Earned certificates stay available. You’ll need to complete all requirements again.</p><button class="btn" id="confirm-restart">Yes, start a new run</button> <button class="btn secondary" id="cancel-restart">Keep current run</button></div><div class="lesson-layout">${panel}${setNavigation()}</div>`; };
+function activeExamPanel() { if(activeExam.kind==='checkpoint')return activeCheckpointPanel(); const set = courseSets[activeExam.set]; return `<div class="exam-focus"><div class="exam-top"><div><span class="tag">EXAM IN PROGRESS · ATTEMPT ${learning.run.attempts[activeExam.set].length}/${maxAttempts()}</span><h1>${esc(set.title)}</h1></div><div class="exam-timer" role="timer" aria-label="Time remaining" id="exam-timer">10:00</div></div><div class="notice">${EXAM_ACTIVE_NOTICE}</div><form id="exam-form" class="panel">${questionFields(set.exam, 'exam-')}<button class="btn" type="submit">Submit examination ${icon('check')}</button><button class="btn secondary" type="button" id="end-exam">End attempt</button></form></div>`; }
+async function startExam(s) {
+  if (examStarting || examFinishing || activeExam || !setUnlocked(s) || !setReady(s) || examPassed(s) || learning.run.attempts[s].length >= maxAttempts()) return false;
+  examStarting = true; interruptedStart = '';
+  const button = document.getElementById('start-exam'); if(button) {button.disabled=true;button.textContent='Starting exam...';}
+  try {
+    if (!await enterExamFullscreen()) { examNotice = FULLSCREEN_REQUIRED; render(); return false; }
+    const result = await learningRequest('exam-start', {setIndex:s});
+    activeExam={set:s,attempt:result.attempt}; examNotice='';
+    if(interruptedStart || document.hidden) { await finishExam('terminated',interruptedStart || 'You left the examination tab while it was starting.'); return false; }
+    render();updateTimer();return true;
+  } catch(error) { exitExamFullscreen(); examNotice=error.message;render();return false; }
+  finally { examStarting=false; }
+}
+// Modules an assessment covers: "module 5" after a single module, "modules 1–3" after a group.
+function checkpointModules(c){const first=c.firstLesson??c.afterLesson-2;return first===c.afterLesson?`module ${c.afterLesson}`:`modules ${first}–${c.afterLesson}`;}
+function checkpointOverview(c){
+  const remaining=Math.max(0,c.maxAttempts-c.attempts.length),best=Math.max(-1,...c.attempts.filter(a=>a.percent!=null).map(a=>a.percent));
+  const fact=(value,label)=>`<div class="assessment-fact"><b>${value}</b><span>${label}</span></div>`;
+  const status=c.passed?'<span class="tag success">✓ Passed</span>':!c.ready?'<span class="tag gray">🔒 Locked</span>':'<span class="tag warn">Ready to start</span>';
+  return `<article class="panel lesson-content assessment-view"><header class="module-header"><div class="module-crumbs"><span class="tag">Required assessment · ${esc(capital(checkpointModules(c)))}</span>${status}</div><h2>${esc(c.title)}</h2><p class="assessment-intro">${esc(c.instructions)}</p></header><div class="assessment-facts">${fact(c.questionCount,'Questions')}${fact(`${c.timeLimitSeconds/60} min`,'Time limit')}${fact(`${c.passPercent}%`,'Pass mark')}${fact(`${remaining}/${c.maxAttempts}`,'Attempts left')}${best>=0?fact(`${best}%`,'Best score'):''}</div>${examNotice?`<div class="notice" role="status">${esc(examNotice)}</div>`:''}${c.passed?'<div class="notice success">Assessment passed. Continue learning, or view your certificate when every requirement is complete.</div>':''}<div class="exam-rules"><h3>Before you start</h3><ul><li>${c.timeLimitSeconds/60} minutes · ${c.questionCount} applied questions · pass mark ${c.passPercent}%.</li><li>${c.maxAttempts} attempts per course run. Starting consumes an attempt.</li>${EXAM_RULE_ITEMS}<li>Answer in this page. No external editor is needed during the assessment.</li></ul></div><div class="assessment-actions">${!c.ready?`<p class="notice">Complete ${checkpointModules(c)} and pass earlier assessments to unlock this assessment.</p>`:!c.passed&&remaining?`<button class="btn btn-large" id="start-checkpoint" data-checkpoint="${esc(c.id)}">I understand — start assessment ${icon('arrow')}</button>`:''}${!c.passed&&!remaining?'<p class="notice">All attempts have been used. Start a new course run to try again; earlier records are retained.</p>':''}${c.passed&&c.afterLesson<learning.run.lessonTotal?`<button class="btn" data-act="lesson-select" data-id="${esc(currentCourseExtras.courseLessons[c.afterLesson]?.id||'')}">Continue to module ${c.afterLesson+1} ${icon('arrow')}</button>`:''}${c.passed&&learning.run.completedAt?`<a class="btn" href="#certificates">${icon('award')} View your certificate</a>`:''}</div><h3 class="sub-heading">Attempt history</h3>${c.attempts.length?`<ol class="attempt-history">${c.attempts.map(a=>`<li class="attempt-${esc(a.status)}"><strong>${esc(capital(a.status))}</strong>${a.score!=null?` · ${a.score}/${a.total} (${a.percent}%)`:''}${a.reason?` · ${esc(a.reason)}`:''}<small>${esc(fmtDateTime(a.startedAt))}</small></li>`).join('')}</ol>`:'<p class="muted">No attempts yet.</p>'}</article>`;
+}
+function checkpointSidebarItem(c){
+  const selected=selectedCheckpointId===c.id,status=c.passed?'done':c.ready?'ready':'locked';
+  return `<button class="lesson-item checkpoint-item is-${status} ${selected?'selected':''}" data-checkpoint-select="${esc(c.id)}" ${selected?'aria-current="step"':''}><span class="module-badge" aria-hidden="true">${c.passed?'✓':c.ready?'★':'🔒'}</span><span class="module-text">${esc(c.title)}<small>${c.passed?'Passed':c.ready?`Ready · ${c.questionCount} questions`:'Locked'}</small></span></button>`;
+}
+function activeCheckpointPanel(){
+  const c=activeExam.checkpoint;
+  return `<div class="exam-focus"><div class="exam-top"><div><span class="tag">ASSIGNMENT IN PROGRESS · ATTEMPT ${activeExam.attempt.attemptNumber}/${c.maxAttempts}</span><h1>${esc(c.title)}</h1></div><div class="exam-timer" role="timer" aria-label="Time remaining" id="exam-timer">${clock(c.timeLimitSeconds)}</div></div><div class="notice">${EXAM_ACTIVE_NOTICE} Answer all ${activeExam.questions.length} questions; pass mark ${c.passPercent}%.</div><form id="checkpoint-form" class="panel">${activeExam.questions.map((q,i)=>`<fieldset class="question"><legend><span>${i+1}.</span> ${esc(q.prompt)}</legend>${q.code?`<pre><code>${esc(q.code)}</code></pre>`:''}${q.options.map((option,j)=>`<label class="answer"><input type="radio" name="checkpoint-${i}" value="${j}" required><span class="answer-letter" aria-hidden="true">${String.fromCharCode(65+j)}</span><span>${esc(option)}</span></label>`).join('')}</fieldset>`).join('')}<button class="btn" type="submit">Submit assignment ${icon('check')}</button><button class="btn secondary" type="button" id="end-exam">End attempt</button></form></div>`;
+}
+async function startCheckpoint(id){
+  const c=(learning.run.checkpoints||[]).find(c=>c.id===id);
+  if(!c||!c.ready||c.passed||examStarting||examFinishing||activeExam)return;
+  examStarting=true;interruptedStart='';selectedCheckpointId=id;
+  const button=document.getElementById('start-checkpoint');if(button)button.disabled=true;
+  try{
+    if(!await enterExamFullscreen()){examNotice=FULLSCREEN_REQUIRED;render();return;}
+    const result=await learningRequest('checkpoint-start',{checkpointId:id});
+    activeExam={kind:'checkpoint',checkpoint:c,attempt:result.attempt,questions:result.questions};examNotice='';
+    if(interruptedStart||document.hidden){await finishCheckpoint(interruptedStart||'You left the assignment tab while it was starting.');return;}
+    render();updateTimer();
+  }catch(error){exitExamFullscreen();examNotice=error.message;render();}finally{examStarting=false;}
+}
+async function finishCheckpoint(reason,answers){
+  if(!activeExam||examFinishing)return;
+  const current=activeExam;examFinishing=true;activeExam=null;exitExamFullscreen();selectedCheckpointId=current.checkpoint.id;examNotice='Saving assignment result…';render();
+  try{
+    const result=await api('learning/checkpoint-finish',{runId:learning.run.id,attemptId:current.attempt.id,...(answers?{answers}:{terminate:true,reason:reason||'The assignment ended.'})},{keepalive:true});
+    applyLearning(result.learning);
+    examNotice=result.attempt.reason||(result.attempt.status==='passed'?`Assignment passed: ${result.attempt.score}/${result.attempt.total} (${result.attempt.percent}%).`:`Score: ${result.attempt.score}/${result.attempt.total} (${result.attempt.percent}%). Review ${checkpointModules(current.checkpoint)} before retrying.`);
+    const data=await api('learning?courseId='+encodeURIComponent(currentCourseInfo.id));
+    currentCourseExtras.courseLessons=data.courseLessons||[];applyLearning(data.learning);
+  }catch(error){examNotice=error.message+' Reopen the course to confirm the saved attempt status.';}
+  finally{examFinishing=false;render();}
+}
+async function finishExam(status, reason, answers) {
+  if(activeExam?.kind==='checkpoint')return finishCheckpoint(reason,answers);
+  if(!activeExam || examFinishing)return;
+  const current=activeExam;activeExam=null;exitExamFullscreen();examFinishing=true;
+  selectedSet=current.set;selectedActivity='exam';examNotice='Saving your examination result...';
+  render();
+  try {
+    const result=await api('learning/exam-finish',{runId:learning.run.id,attemptId:current.attempt.id,...(answers?{answers}:{terminate:true,reason:reason||'The examination ended.'})},{keepalive:true});
+    applyLearning(result.learning);
+    examNotice=result.attempt.reason || (result.attempt.status==='passed'?'Well done! You passed this examination.':`You did not reach ${passMark()}%. Review the lessons before your next attempt.`);
+  } catch(error) {examNotice=error.message+' Reload to confirm the saved attempt status.';}
+  finally {examFinishing=false;render();}
+}
+function updateTimer() { if (!activeExam) return; const seconds = Math.max(0, Math.ceil((activeExam.attempt.deadline - Date.now()) / 1000)); if (!seconds) return finishExam('terminated', 'Time expired. This attempt has ended.'); const timer = document.getElementById('exam-timer'); if (timer) timer.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`; }
+function terminateExam(reason) { if(examStarting&&!activeExam)interruptedStart=reason; if(activeExam) return finishExam('terminated',reason); }
+async function resetCourse() {
+  if(activeExam || examStarting || examFinishing)return;
+  const button=document.getElementById('confirm-restart');if(button)button.disabled=true;
+  try {await learningRequest('restart');selectedSet=0;selectedActivity='overview';selectedCheckpointId=null;selectedLessonId=null;exerciseFeedback=null;examNotice='';if(currentCourseInfo.format==='lessons'){const data=await api('learning?courseId='+encodeURIComponent(currentCourseInfo.id));currentCourseExtras.courseLessons=data.courseLessons||[];}render();toast('A fresh course run is ready. All earlier learning records are preserved.');}
+  catch(error){toast(error.message);if(button)button.disabled=false;}
+}
+function saveVideoProgress(i,record) {
+  return learningRequest('video',{videoIndex:i,watched:Math.min(lessons[i].duration,record.watched||0),complete:record.complete===true}).catch(error=>{toast(error.message);throw error;});
+}
+function wireVideo() { const video = document.getElementById('course-video'); if (!video) return; const i = Number(selectedActivity.split('-')[1]); const record = learning.run.videos[i] ||= { watched: 0, complete: false }; let lastPosition = 0, lastTime = performance.now(), lastSaved = 0;
+  video.addEventListener('loadedmetadata', () => { if (!record.complete && record.watched > 0) { video.currentTime = Math.min(record.watched, video.duration - 1); lastPosition = video.currentTime; } lastTime = performance.now(); });
+  video.addEventListener('seeking', () => { if (!record.complete && video.currentTime > record.watched + 1) { video.currentTime = record.watched; } lastPosition = video.currentTime; lastTime = performance.now(); });
+  video.addEventListener('play', () => { lastPosition = video.currentTime; lastTime = performance.now(); });
+  video.addEventListener('timeupdate', () => { const now = performance.now(), delta = video.currentTime - lastPosition, elapsed = (now - lastTime) / 1000; if (!video.paused && delta > 0 && delta <= elapsed * Math.max(1, video.playbackRate) + 0.5 && lastPosition <= record.watched + 1) record.watched = Math.max(record.watched, video.currentTime); lastPosition = video.currentTime; lastTime = now; if (now - lastSaved > 2000) { saveVideoProgress(i,record).catch(()=>{}); lastSaved = now; } });
+  video.addEventListener('ended', async () => { if (record.watched >= video.duration * 0.9) { record.complete = true; try { await saveVideoProgress(i,record); const status = document.getElementById('video-status'); if (status) status.textContent = 'Video completed. Your progress is saved to your account.'; render(); } catch { record.complete=false; } } else toast('Watch the full video before continuing.'); });
+  video.addEventListener('error', () => { const status = document.getElementById('video-status'); if (status) status.textContent = 'The video could not load. Try Chrome or Edge and check the local video files.'; });
+}
+const originalRender = render;
+render = function() { originalRender(); document.body.classList.toggle('exam-active', examActive());
+  document.querySelectorAll('[data-set]').forEach(button => button.onclick = () => { if (activeExam || !setUnlocked(Number(button.dataset.set))) return; selectedSet = Number(button.dataset.set); selectedActivity = 'overview'; exerciseFeedback = null; examNotice = ''; render(); });
+  document.querySelectorAll('[data-activity]').forEach(button => button.onclick = () => { if (activeExam) return; selectedActivity = button.dataset.activity; exerciseFeedback = null; examNotice = ''; render(); });
+  const exercise = document.getElementById('exercise-form'); if(exercise)exercise.onsubmit=async event=>{
+    event.preventDefault(); const e=Number(exercise.dataset.exercise),questions=courseSets[selectedSet].exercises[e].questions,answers=readAnswers(exercise,questions,'practice-');if(answers.includes(null))return;
+    const button=exercise.querySelector('button');if(button.disabled)return;button.disabled=true;
+    try {const result=await learningRequest('exercise',{setIndex:selectedSet,exerciseIndex:e,answers});exerciseFeedback=result.feedback;render();}
+    catch(error){toast(error.message);button.disabled=false;}
+  };
+  const start = document.getElementById('start-exam'); if (start) start.onclick = () => startExam(selectedSet);
+  const checkpointStart=document.getElementById('start-checkpoint');if(checkpointStart)checkpointStart.onclick=()=>startCheckpoint(checkpointStart.dataset.checkpoint);
+  document.querySelectorAll('[data-checkpoint-select]').forEach(button=>button.onclick=()=>{if(activeExam||examStarting||examFinishing)return;selectedCheckpointId=button.dataset.checkpointSelect;examNotice='';render();});
+  const checkpointForm=document.getElementById('checkpoint-form');if(checkpointForm)checkpointForm.onsubmit=event=>{event.preventDefault();if(activeExam?.kind!=='checkpoint')return;if(Date.now()>=activeExam.attempt.deadline)return finishCheckpoint('Time expired. This assignment attempt has ended.');const values=new FormData(checkpointForm),answers=activeExam.questions.map((_,i)=>values.get('checkpoint-'+i));if(answers.every(a=>a!==null))finishCheckpoint(null,answers.map(Number));};
+  if(checkpointForm&&activeExam?.kind==='checkpoint'){
+    document.querySelectorAll('#checkpoint-form input[type="radio"]').forEach(input=>{const i=Number(input.name.split('-')[1]);input.checked=activeExam.draft?.[i]===Number(input.value);});
+    checkpointForm.onchange=()=>{const values=new FormData(checkpointForm);activeExam.draft=activeExam.questions.map((_,i)=>{const value=values.get('checkpoint-'+i);return value===null?null:Number(value);});};
+  }
+  const exam = document.getElementById('exam-form'); if (exam) exam.onsubmit = event => { event.preventDefault(); if (!activeExam) return; if (Date.now() >= activeExam.attempt.deadline) return finishExam('terminated', 'Time expired. This attempt has ended.'); const answers = readAnswers(exam, courseSets[activeExam.set].exam, 'exam-'); if (!answers.includes(null)) finishExam('submitted', null, answers); };
+  const end = document.getElementById('end-exam'); if (end) end.onclick = () => terminateExam('You ended this attempt before submission.');
+  const restart = document.getElementById('restart-course'); if (restart) restart.onclick = () => document.getElementById('restart-confirm').classList.remove('hidden');
+  const confirm = document.getElementById('confirm-restart'); if (confirm) confirm.onclick = resetCourse;
+  const cancel = document.getElementById('cancel-restart'); if (cancel) cancel.onclick = () => document.getElementById('restart-confirm').classList.add('hidden');
+  const picker=document.getElementById('certificate-choice');if(picker)picker.onchange=()=>{selectedAwardId=picker.value;render();};
+  document.querySelectorAll('[data-open-certificate-sharing]').forEach(button=>button.onclick=()=>{
+    const dialog=document.getElementById('certificate-sharing-dialog');
+    if(dialog?.showModal)dialog.showModal();else dialog?.setAttribute('open','');
+  });
+  const confirmSharing=document.querySelector('[data-confirm-certificate-sharing]');
+  if(confirmSharing)confirmSharing.onclick=()=>{
+    const award=learning.certificates.find(item=>item.id===selectedAwardId)||learning.certificates[learning.certificates.length-1];
+    if(award)updateCertificateSharing(award,true,confirmSharing);
+  };
+  const cancelSharing=document.querySelector('[data-cancel-certificate-sharing]');
+  if(cancelSharing)cancelSharing.onclick=()=>document.getElementById('certificate-sharing-dialog')?.close();
+  document.querySelectorAll('[data-certificate-sharing]').forEach(button=>button.onclick=()=>{
+    const award=learning.certificates.find(item=>item.id===selectedAwardId)||learning.certificates[learning.certificates.length-1];
+    if(award)updateCertificateSharing(award,button.dataset.certificateSharing==='on',button);
+  });
+  const copyCertificate=document.querySelector('[data-copy-certificate-link]');
+  if(copyCertificate)copyCertificate.onclick=()=>{const award=learning.certificates.find(item=>item.id===selectedAwardId)||learning.certificates[learning.certificates.length-1];if(award)copyCertificateLink(award);};
+  const linkedinDetails=document.querySelector('[data-linkedin-details]');
+  document.querySelectorAll('[data-open-linkedin-details]').forEach(link=>link.onclick=()=>{
+    if(linkedinDetails){linkedinDetails.hidden=false;linkedinDetails.scrollIntoView({behavior:'smooth',block:'nearest'});}
+  });
+  document.querySelectorAll('[data-copy-linkedin-detail]').forEach(button=>button.onclick=()=>copyLinkedInDetail(button));
+  document.querySelectorAll('[data-select-certificate-number]').forEach(number=>number.onclick=()=>{
+    const selection=window.getSelection(),range=document.createRange();range.selectNodeContents(number);selection.removeAllRanges();selection.addRange(range);
+  });
+  if(typeof wirePythonPractice==='function')wirePythonPractice();
+  if(typeof wireLessonKnowledge==='function')wireLessonKnowledge();
+  wireVideo();
+  if (typeof wireLessonVideo === 'function') wireLessonVideo();
+};
+certificates = function() {
+  const award = learning.certificates.find(a=>a.id===selectedAwardId)||learning.certificates[learning.certificates.length - 1];
+  if (!award) return `<div class="intro"><div><h1>My achievements</h1><p>Your progress becomes a milestone.</p></div></div><div class="panel certificate-empty"><div class="stat-icon">${icon('award')}</div><h2>Your certificate is waiting</h2><p>${learning.run.format==='lessons'?`Complete all ${learning.run.lessonTotal||''} modules and pass every required assessment`:'Watch all 6 videos, complete all 6 exercises, and pass all 3 module exams'}<br>to generate your certificate. Current course progress: ${pct()}%.</p><a class="btn" href="#course">Continue course ${icon('arrow')}</a></div>`;
+  // The certificate records the candidate and date at completion, even after a restart.
+  return `<div class="certificate-picker"><label for="certificate-choice">Your certificates</label><select id="certificate-choice">${learning.certificates.map(a=>`<option value="${esc(a.id)}" ${a.id===award.id?'selected':''}>${esc(a.courseTitle||'Course')} - ${esc(new Date(a.completedAt).toLocaleDateString('en-IN'))}</option>`).join('')}</select></div>`+certificateMarkup(award);
+};
+function certificateTools(award) {
+  const shared=Boolean(award.shareEnabled&&award.publicUrl);
+  const linkedInUrl='https://www.linkedin.com/profile/add?startTask=CERTIFICATION_NAME';
+  return `<div class="certificate-tools"><button class="btn secondary" data-print-certificate>Print / Save PDF ${icon('award')}</button>${shared?`<a class="btn" href="${linkedInUrl}" target="_blank" rel="noopener noreferrer" data-open-linkedin-details title="LinkedIn may ask you to enter the certificate details manually.">Add to LinkedIn</a>`:'<button class="btn" type="button" data-open-certificate-sharing>Add to LinkedIn</button>'}<button class="btn secondary" type="button" ${shared?'data-copy-certificate-link':'data-open-certificate-sharing'}>Copy link</button></div>`;
+}
+function linkedinDetailsPanel(award) {
+  const issueDate=new Intl.DateTimeFormat('en-US',{month:'long',year:'numeric',timeZone:'Asia/Kolkata'}).format(new Date(award.completedAt));
+  const details=[['Name',award.courseTitle||'ShimentoX course'],['Issuing organization','ShimentoX'],['Issue date',issueDate],['Credential ID',award.certificateNumber||''],['Credential URL',award.publicUrl||'']];
+  return `<section class="panel linkedin-details" data-linkedin-details aria-labelledby="linkedin-details-title" tabindex="-1" hidden><h2 id="linkedin-details-title">Your certificate details</h2><ol>${details.map(([label,value])=>`<li class="linkedin-detail"><div><strong>${label}</strong><span data-linkedin-value>${esc(value)}</span></div><button class="btn secondary" type="button" data-copy-linkedin-detail>Copy</button></li>`).join('')}</ol><p class="linkedin-details-tip">Leave Expiration date empty. Add at least one skill (LinkedIn requires it).</p>${award.publicBaseConfigured===false?'<p class="linkedin-details-warning" role="status">This link only works on this computer. LinkedIn and other people can\'t open it.</p>':''}</section>`;
+}
+function certificateSharingPanel(award) {
+  if(award.shareEnabled&&award.publicUrl)return `<section class="panel certificate-sharing" aria-label="Certificate sharing"><p role="status">Public sharing is on. Anyone with the link can see your name, course, completion date and certificate number.</p><p class="certificate-sharing-error" role="alert" hidden></p><button class="btn secondary" type="button" data-certificate-sharing="off">Turn sharing off</button></section>`;
+  return `<section class="panel certificate-sharing" aria-label="Certificate sharing"><p>Sharing is off. Turn it on to use Add to LinkedIn or Copy link.</p><button class="btn secondary" type="button" data-open-certificate-sharing>Turn on sharing</button></section>`;
+}
+function certificateSharingDialog() {
+  return `<dialog class="certificate-sharing-dialog" id="certificate-sharing-dialog" aria-labelledby="certificate-sharing-title"><div class="certificate-sharing-dialog-body"><h2 id="certificate-sharing-title">Turn on public sharing?</h2><p>Anyone with the link can see your name, course, completion date and certificate number.</p><p class="certificate-sharing-dialog-note">After you confirm, your public link will be created. Then click Copy link or Add to LinkedIn again. LinkedIn may require you to enter the certificate details manually.</p><p class="certificate-sharing-error" role="alert" hidden></p><div class="certificate-sharing-dialog-actions"><button class="btn secondary" type="button" data-cancel-certificate-sharing>Cancel</button><button class="btn" type="button" data-confirm-certificate-sharing>Turn on sharing</button></div></div></dialog>`;
+}
+function certificateMarkup(award) {
+  const date=new Intl.DateTimeFormat('en-IN',{day:'numeric',month:'long',year:'numeric',timeZone:'Asia/Kolkata'}).format(new Date(award.completedAt));
+  const latest=learning.certificates[learning.certificates.length-1]?.id===award.id;
+  return `<div class="intro certificate-intro"><div><h1>My achievements</h1><p>You completed ${esc(award.courseTitle||'your course')}! ${learning.certificates.length} certificate${learning.certificates.length===1?'':'s'} earned. ${latest?'Showing your latest achievement.':'Viewing a previous achievement.'}</p></div>${certificateTools(award)}</div>${award.shareEnabled&&award.publicUrl?linkedinDetailsPanel(award):''}<article class="certificate"><div class="certificate-header"><img src="assets/images/ShimentoX-Light-Logo.webp" alt="ShimentoX" width="960" height="169"><span>LEARNING & DEVELOPMENT</span></div><div class="certificate-body"><div class="certificate-kicker">A COMMITMENT TO CONTINUOUS GROWTH</div><h2>Certificate of Completion</h2><p class="certificate-presented">This certificate is proudly presented to</p><h3 class="certificate-name">${esc(award.name)}</h3><p class="certificate-description">for successfully completing all lessons, practice activities and required assessments in</p><h4 class="certificate-course">${esc(award.courseTitle||currentCourseInfo.title)}</h4><p class="certificate-description">Lessons &middot; Practice &middot; Assessment</p><div class="certificate-details"><div><strong>${esc(date)}</strong><span>DATE OF COMPLETION</span></div><div class="certificate-seal">${icon('award')}<span>COURSE<br>COMPLETED</span></div><div><strong>ShimentoX</strong><span>LEARNING & DEVELOPMENT</span></div></div><p class="certificate-note">Certificate number <span class="certificate-number" data-select-certificate-number title="Click to select certificate number">${esc(award.certificateNumber)}</span></p></div></article>${certificateSharingPanel(award)}${certificateSharingDialog()}<div class="certificate-actions"><a class="btn secondary" href="#course">Revisit course →</a><p>Choose “Save as PDF” in the print dialog to download your certificate.</p></div>${learning.certificates.length>1?`<div class="panel certificate-history"><h3>Previous achievements</h3>${learning.certificates.filter(a=>a.id!==award.id).reverse().map(a=>`<p>${esc(a.name)} · ${esc(new Date(a.completedAt).toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata'}))} · ${esc(a.certificateNumber)}</p>`).join('')}</div>`:''}`;
+}
+async function updateCertificateSharing(award, enabled, button) {
+  const error=button.closest('dialog')?.querySelector('.certificate-sharing-error')||document.querySelector('.certificate-sharing-error');
+  const label=enabled?'Turn sharing on':'Turn sharing off';
+  if(button.disabled)return;
+  button.disabled=true;
+  button.setAttribute('aria-busy','true');
+  button.textContent=enabled?'Turning sharing on…':'Turning sharing off…';
+  if(error){error.hidden=true;error.textContent='';}
+  try {
+    const result=await api(`certificates/${encodeURIComponent(award.id)}/sharing`,{enabled,...(enabled?{consent:true}:{})});
+    Object.assign(award,result);render();
+  } catch(failure) {
+    const message=failure.message||'Could not update certificate sharing. Please try again.';
+    if(error){error.textContent=message;error.hidden=false;}
+    toast(message);
+  } finally {
+    if(button.isConnected){
+      button.disabled=false;
+      button.textContent=label;
+      button.removeAttribute('aria-busy');
+    }
+  }
+}
+async function copyCertificateLink(award) {
+  if(!award.publicUrl)return;
+  try {
+    if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(award.publicUrl);
+    else {const field=document.createElement('textarea');field.value=award.publicUrl;field.setAttribute('readonly','');field.style.position='fixed';field.style.opacity='0';document.body.appendChild(field);field.select();const copied=document.execCommand('copy');field.remove();if(!copied)throw new Error('Copy is unavailable in this browser.');}
+    toast('Public certificate link copied.');
+  } catch(error) { toast(error.message||'Could not copy the certificate link.'); }
+}
+async function copyLinkedInDetail(button) {
+  const value=button.closest('.linkedin-detail')?.querySelector('[data-linkedin-value]')?.textContent||'';
+  try {
+    if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(value);
+    else {const field=document.createElement('textarea');field.value=value;field.setAttribute('readonly','');field.style.position='fixed';field.style.opacity='0';document.body.appendChild(field);field.select();const copied=document.execCommand('copy');field.remove();if(!copied)throw new Error('Copy is unavailable in this browser.');}
+    const original=button.textContent;button.textContent='Copied';button.setAttribute('aria-live','polite');setTimeout(()=>{if(button.isConnected)button.textContent=original;},1200);
+  } catch(error) { toast(error.message||'Could not copy this certificate detail.'); }
+}
+// Exam security rules for every scored attempt: module exams, assignments, knowledge checks, final and standalone assessments.
+// The attempt runs in full screen; leaving full screen, switching tabs or windows, navigating away or reloading ends it,
+// and every ended attempt counts toward the three-attempt limit enforced on the server.
+const FULLSCREEN_REQUIRED='Exams run in full screen. Allow full screen for this site in your browser, then start again. No attempt was used.';
+const EXAM_RULE_ITEMS='<li>The exam opens in full screen. Leaving full screen ends the attempt.</li><li>Switching tabs or windows, navigating away, reloading or closing the page ends the attempt.</li><li>No more than 3 attempts. Every started attempt counts, including ended ones.</li>';
+const EXAM_ACTIVE_NOTICE='Stay in full screen and in this tab. Leaving full screen, switching tabs or windows, navigating away or reloading ends this attempt.';
+function examActive(){return Boolean(activeExam||(typeof assessmentInProgress==='function'&&assessmentInProgress()));}
+async function enterExamFullscreen(){
+  if(document.fullscreenElement)return true;
+  try{await document.documentElement.requestFullscreen();}catch{return false;}
+  return Boolean(document.fullscreenElement);
+}
+function exitExamFullscreen(){if(document.fullscreenElement&&document.exitFullscreen)document.exitFullscreen().catch(()=>{});}
+function endAttempts(reason){terminateExam(reason);if(typeof terminateAssessment==='function')terminateAssessment(reason);}
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) endAttempts('Attempt terminated: you exited full screen.'); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) endAttempts('Attempt terminated: you switched tabs or hid the examination page.'); });
+window.addEventListener('blur', () => endAttempts('Attempt terminated: you left the examination window.'));
+window.addEventListener('pagehide', () => endAttempts('Attempt terminated: you left or reloaded the examination page.'));
+window.addEventListener('beforeunload', () => endAttempts('Attempt terminated: you left or reloaded the examination page.'));
+// Any link or control outside the exam form (sidebar, lesson list, header) counts as navigating away.
+window.addEventListener('click', event => {
+  if (!examActive()) return;
+  const control = event.target.closest?.('a[href],button,[data-act],[data-set],[data-checkpoint-select],[data-lesson-select]');
+  if (!control || control.closest('#exam-form,#checkpoint-form,[data-form="assessment-submit"],[data-form="inline-assessment"]')) return;
+  event.preventDefault(); event.stopPropagation?.(); endAttempts('Attempt terminated: you navigated away from the exam.');
+}, true);
+setInterval(updateTimer, 1000);
+initializePortal();

@@ -1,10 +1,10 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { AlertCircle, Clock3, Database, Eye, EyeOff, FlaskConical, Info, KeyRound, LogIn, RotateCcw, ShieldCheck } from 'lucide-react';
 import type { Role } from '@/types';
 import { useSession } from '@/context/SessionContext';
 import { useToast } from '@/context/ToastContext';
 import { useApiQuery } from '@/hooks/useApiQuery';
-import { ApiError, IS_MOCK_MODE, authService, mockControlService } from '@/services';
+import { API_BASE_URL, ApiError, IS_MOCK_MODE, authService, mockControlService } from '@/services';
 import { Button } from '@/components/common/Button';
 import { Field, Input } from '@/components/forms/FormControls';
 import { Alert, Avatar } from '@/components/common/Misc';
@@ -128,8 +128,39 @@ function describeLoginError(err: unknown): { tone: LoginErrorTone; title: string
   return { tone: 'danger', title: 'Sign-in failed', message: err instanceof Error ? err.message : 'Please try again.' };
 }
 
+/** Messages for the ?signin_error= codes the API returns after an unsuccessful Keka sign-in. */
+const KEKA_SIGNIN_ERRORS: Record<string, string> = {
+  'keka-not-configured': 'Sign-in with Keka is not set up yet. Ask your administrator, or sign in with your email and password.',
+  'keka-cancelled': 'Keka sign-in was cancelled. Try again when you are ready.',
+  'keka-expired': 'Your Keka sign-in took too long or was interrupted. Please try again.',
+  'keka-other-company': 'This Keka account belongs to a different company. Sign in with your ShimentoX Keka account.',
+  'keka-not-employee': 'Your Keka account was found, but there is no matching employee account here. Contact your administrator.',
+  'keka-inactive': 'Your account is not active. Contact HR or your administrator.',
+  'keka-unreachable': 'Keka could not be reached right now. Please try again in a few minutes.',
+  'keka-failed': 'Keka sign-in could not be completed. Please try again.',
+};
+
+/**
+ * Reads (once per page load) the result of a Keka sign-in from the address bar and removes it, so a reload or
+ * React's development double-render never reuses the one-time code.
+ */
+let kekaReturn: { code: string | null; error: string | null } | null = null;
+function takeKekaReturn() {
+  if (kekaReturn) return kekaReturn;
+  const params = new URLSearchParams(window.location.search);
+  kekaReturn = { code: params.get('keka_code'), error: params.get('signin_error') };
+  if (kekaReturn.code || kekaReturn.error) {
+    params.delete('keka_code');
+    params.delete('signin_error');
+    const rest = params.toString();
+    window.history.replaceState(null, '', window.location.pathname + (rest ? `?${rest}` : '') + window.location.hash);
+  }
+  return kekaReturn;
+}
+let kekaExchangeStarted = false;
+
 function LoginForm() {
-  const { login, notice } = useSession();
+  const { login, kekaLogin, notice } = useSession();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
@@ -138,6 +169,19 @@ function LoginForm() {
   const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({});
   const [error, setError] = useState<ReturnType<typeof describeLoginError> | null>(null);
   const [busy, setBusy] = useState(false);
+  const [kekaBusy, setKekaBusy] = useState(false);
+
+  // Coming back from Keka: finish the sign-in, or explain why it failed.
+  useEffect(() => {
+    const { code, error: kekaError } = takeKekaReturn();
+    if (kekaError) setError({ tone: 'danger', title: 'Keka sign-in failed', message: KEKA_SIGNIN_ERRORS[kekaError] ?? KEKA_SIGNIN_ERRORS['keka-failed']! });
+    if (!code || kekaExchangeStarted) return;
+    kekaExchangeStarted = true;
+    setKekaBusy(true);
+    kekaLogin(code)
+      .catch((err: unknown) => setError({ ...describeLoginError(err), title: 'Keka sign-in failed' }))
+      .finally(() => setKekaBusy(false));
+  }, [kekaLogin]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -242,7 +286,25 @@ function LoginForm() {
         </Alert>
       )}
 
-      <Button type="submit" icon={LogIn} loading={busy} className="w-full">Sign in</Button>
+      <Button type="submit" icon={LogIn} loading={busy} disabled={kekaBusy} className="w-full">Sign in</Button>
+
+      {!IS_MOCK_MODE && (
+        <>
+          <div className="flex items-center gap-3 text-xs uppercase tracking-wide text-slate-400" role="separator">
+            <span className="h-px flex-1 bg-slate-200" />or<span className="h-px flex-1 bg-slate-200" />
+          </div>
+          <a
+            href={`${API_BASE_URL}/auth/keka/start`}
+            onClick={() => setKekaBusy(true)}
+            aria-disabled={kekaBusy}
+            className="flex w-full items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/30 aria-disabled:pointer-events-none aria-disabled:opacity-60"
+          >
+            {kekaBusy ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-brand-600" aria-hidden /> : <KeyRound className="h-4 w-4" />}
+            Sign in with Keka account
+          </a>
+          <p className="text-center text-xs text-slate-500">Use the same email and password you use for Keka. The same sign-in also opens your LMS.</p>
+        </>
+      )}
       <p className="text-center text-xs text-slate-500">Accounts are created by your administrator. There is no self-registration.</p>
     </form>
   );

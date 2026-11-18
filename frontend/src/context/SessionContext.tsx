@@ -20,6 +20,8 @@ interface SessionApi {
   notice: string | null;
   login(body: LoginRequest): Promise<Employee>;
   mockLogin(userId: string): Promise<Employee>;
+  /** Completes "Sign in with Keka account" with the one-time code the API returned. */
+  kekaLogin(code: string): Promise<Employee>;
   setup(body: SetupRequest): Promise<Employee>;
   logout(): Promise<void>;
   /** Re-read the signed-in user (e.g. after an admin edits their own profile). */
@@ -86,6 +88,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (body: LoginRequest) => signedIn(await authService.login(body)), [signedIn]);
   const mockLogin = useCallback(async (id: string) => signedIn(await authService.mockLogin(id)), [signedIn]);
+  const kekaLogin = useCallback(async (code: string) => signedIn(await authService.kekaExchange(code)), [signedIn]);
   const setup = useCallback(async (body: SetupRequest) => signedIn(await authService.setup(body)), [signedIn]);
 
   const logout = useCallback(async () => {
@@ -102,8 +105,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const retry = useCallback(() => setAttempt((a) => a + 1), []);
 
   const value = useMemo<SessionApi>(
-    () => ({ status, user, error, notice, login, mockLogin, setup, logout, refreshUser, retry }),
-    [status, user, error, notice, login, mockLogin, setup, logout, refreshUser, retry],
+    () => ({ status, user, error, notice, login, mockLogin, kekaLogin, setup, logout, refreshUser, retry }),
+    [status, user, error, notice, login, mockLogin, kekaLogin, setup, logout, refreshUser, retry],
   );
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }

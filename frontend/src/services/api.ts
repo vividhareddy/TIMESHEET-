@@ -44,7 +44,7 @@ let unauthorizedHandler: ((message: string) => void) | null = null;
 export function onUnauthorized(handler: ((message: string) => void) | null): void {
   unauthorizedHandler = handler;
 }
-const AUTH_ENTRY_PATHS = ['/auth/login', '/auth/setup', '/auth/logout'];
+const AUTH_ENTRY_PATHS = ['/auth/login', '/auth/setup', '/auth/logout', '/auth/keka/exchange'];
 
 /** Normalised error thrown by every service call. */
 export class ApiError extends Error {

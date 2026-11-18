@@ -21,6 +21,13 @@ export const authService = {
     return res.user;
   },
 
+  /** POST /auth/keka/exchange — trades the one-time code from a Keka sign-in for the session token. */
+  async kekaExchange(code: string): Promise<Employee> {
+    const res = await unwrap(apiClient.post<AuthResponse>('/auth/keka/exchange', { code }));
+    tokenStore.set(res.token);
+    return res.user;
+  },
+
   /** GET /auth/me — the signed-in user (requires a stored token). */
   me: () => unwrap(apiClient.get<Employee>('/auth/me')),
 

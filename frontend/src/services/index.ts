@@ -17,3 +17,5 @@ export { overtimeService } from './overtimeService';
 export { reportService } from './reportService';
 export { lookupService } from './lookupService';
 export { mockControlService } from './mockControlService';
+export { lmsService } from './lmsService';
+export { API_BASE_URL } from './config';

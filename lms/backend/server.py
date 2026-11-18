@@ -1,0 +1,87 @@
+"""Start the local ShimentoX frontend and API on one origin; the data lives in MongoDB (see src/store.py)."""
+import argparse
+import os
+import sys
+import threading
+import webbrowser
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'src'))
+from database import initialize, seed_admin
+from deadlines import portal_timezone
+from server import PortalServer, PortalHandler
+import reminders
+import store
+
+
+def load_env(path):
+    """Read KEY=VALUE lines from backend/.env (private settings such as Keka keys; never committed).
+    Variables already set in the real environment take precedence."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if line and not line.startswith('#') and '=' in line:
+            key, value = line.split('=', 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def main():
+    load_env(Path(__file__).resolve().parent / '.env')
+    parser = argparse.ArgumentParser(description='ShimentoX LMS server')
+    parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', '5007')))
+    parser.add_argument('--host', default='127.0.0.1')
+    parser.add_argument('--init-db', action='store_true')
+    parser.add_argument('--open', action='store_true', help='Open the portal in the default browser after startup')
+    args = parser.parse_args()
+    # The MongoDB database: LMS_MONGODB_DB, otherwise the shared configured database (store.settings()).
+    target = store.settings()['database']
+    try:
+        portal_timezone()
+    except ValueError as error:
+        print(error, file=sys.stderr, flush=True)
+        sys.exit(1)
+    initialize(target)
+    seed_admin(target)
+    if args.init_db:
+        print(f'MongoDB database initialized: {target}')
+        return
+    try:
+        server = PortalServer((args.host, args.port), PortalHandler, target)
+    except OSError:
+        print(f'Port {args.port} is already in use, probably by an earlier ShimentoX server that is still running.\n'
+              f'Stop it (Ctrl+C in its terminal, or end the python.exe process) and run npm start again, or choose another port with --port.', file=sys.stderr, flush=True)
+        sys.exit(1)
+    browser_host = 'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host
+    url = f'http://{browser_host}:{server.server_port}'
+    print(f'ShimentoX LMS: {url}', flush=True)
+    print(f'MongoDB database: {target}', flush=True)
+    if not os.environ.get('LMS_PUBLIC_BASE_URL', '').strip():
+        print('Warning: LMS_PUBLIC_BASE_URL is unset. Certificate share links use the request host; LinkedIn cannot reach localhost or private network addresses.', file=sys.stderr, flush=True)
+    if args.open:
+        # The database and listening socket are ready; browser launch cannot block HTTP serving.
+        def open_browser():
+            try:
+                if webbrowser.open(url, new=2):
+                    return
+            except OSError:
+                pass
+            print(f'Could not open the browser automatically. Open {url}', flush=True)
+        threading.Thread(target=open_browser, daemon=True).start()
+    # Deadline reminders run for as long as this process does, whether or not anyone has the portal open.
+    try:
+        reminder_seconds = int(os.environ.get('LMS_REMINDER_INTERVAL_SECONDS', '300'))
+    except ValueError:
+        reminder_seconds = 300
+    if reminder_seconds > 0:
+        reminders.start_scheduler(target, reminder_seconds)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == '__main__':
+    main()

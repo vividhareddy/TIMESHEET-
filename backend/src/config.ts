@@ -20,9 +20,30 @@ if (process.env.JWT_SECRET!.length < 32) {
 }
 
 /** Typed configuration read from environment variables (backend/.env). */
+const port = Number(process.env.PORT) || 5000;
+const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
+const trimSlash = (url: string) => url.trim().replace(/\/+$/, '');
+
+if (process.env.LMS_SSO_SECRET && process.env.LMS_SSO_SECRET.length < 32) {
+  console.error('[config] LMS_SSO_SECRET must be at least 32 characters long. Check backend/.env.');
+  process.exit(1);
+}
+
 export const config = {
-  port: Number(process.env.PORT) || 5000,
-  corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+  port,
+  corsOrigin,
+  publicUrls: {
+    /** Where the timesheet frontend is served (Keka sign-in returns the browser here). */
+    app: trimSlash(process.env.APP_PUBLIC_URL || corsOrigin),
+    /** Where this API is reachable from the browser (the Keka callback address). */
+    api: trimSlash(process.env.API_PUBLIC_URL || `http://localhost:${port}`),
+  },
+  lms: {
+    /** The LMS portal ("My LMS" in the sidebar). */
+    url: trimSlash(process.env.LMS_URL || 'http://localhost:5007'),
+    /** Shared with lms/backend/.env: signs the one-minute tickets that sign users in to the LMS. */
+    ssoSecret: process.env.LMS_SSO_SECRET || '',
+  },
   jwt: {
     secret: process.env.JWT_SECRET!,
     /** Lifetime of a normal sign-in token (jsonwebtoken / ms format, e.g. "8h"). */

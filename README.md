@@ -9,12 +9,13 @@ Project-based timesheets: employees are allocated to multiple client projects, r
 ```
 .
 ├── frontend/   React + Vite + TypeScript + Tailwind UI   (own package.json / node_modules)
-├── backend/    Node.js + Express + PostgreSQL API        (own package.json / node_modules)
+├── backend/    Node.js + Express + MongoDB API           (own package.json / node_modules)
+├── lms/        ShimentoX LMS: Python server + static UI, stored in the same MongoDB database
 ├── .gitignore
 └── README.md
 ```
 
-The two applications are independent: each has its own dependencies and is installed and started from its own folder.
+Each part has its own dependencies and is started from its own folder. The timesheet and the LMS share one MongoDB database and one sign-in (see [LMS and single sign-on](#lms-and-single-sign-on)).
 
 ## Prerequisites
 
@@ -41,15 +42,26 @@ Check it is running:
 
 Production: `npm run build` then `npm start`.
 
-### 2. Frontend (UI on http://localhost:5173)
+### 2. Frontend (UI on http://localhost:5172)
 
 In a second terminal:
 
 ```bash
 cd frontend
 npm install
-npm run dev
+npx vite --port 5172      # must match CORS_ORIGIN in backend/.env
 ```
+
+### 3. LMS (http://localhost:5007)
+
+In a third terminal (needs Python 3 with `pymongo`: `pip install pymongo`):
+
+```bash
+cd lms
+npm run start:server      # or: python backend/server.py
+```
+
+`lms/backend/.env` holds the single sign-on secret (see below). The LMS reads `MONGODB_URI` / `MONGODB_DB_NAME` from `backend/.env` unless `LMS_MONGODB_URI` / `LMS_MONGODB_DB` are set, and creates its collections (prefixed `lms_`) and course catalogue on first start.
 
 The frontend reads its environment from files in `frontend/`:
 
@@ -71,6 +83,20 @@ Other scripts: `npm run build` (type-check + production bundle in `frontend/dist
 | `VITE_API_BASE_URL` | e.g. `http://localhost:5000/api` | Express API base URL |
 
 **Mock mode** (`VITE_API_MODE=mock`, development only) is clearly labelled in the UI ("Mock API — not real data"). It starts with an **empty** database stored in the browser. From the sign-in page (or Admin → Settings → Data source) a developer can explicitly load an illustrative sample dataset or reset to empty, and quick-sign-in as any mock account (sample accounts use the password `Password@123`; employees created in mock mode use the temporary password the admin sets in the employee form). None of this exists in API mode, and `src/mocks` is excluded from production builds.
+
+## LMS and single sign-on
+
+The timesheet login is the only login. **My LMS** in the sidebar (every role) opens the LMS in a new tab, already signed in:
+
+1. The frontend calls `POST /api/lms/launch`. The API returns the LMS address with a ticket: an HS256 JWT signed with `LMS_SSO_SECRET`, valid for one minute and usable once, carrying the employee's email, name, role, designation, department, joining date, manager's email and direct reports' emails.
+2. The LMS verifies it at `GET /api/auth/timesheet`, creates or updates the LMS account (admin → Admin, manager → Manager, associate → Employee; LMS-only HR/Trainer roles are kept), links the manager and direct reports, and starts its own session. Learning history is never touched.
+3. Opening the LMS directly while signed out sends the browser to the timesheet sign-in. `http://localhost:5007/?local=1` still shows the LMS's own sign-in form for LMS-only accounts.
+
+`LMS_SSO_SECRET` must have the same value (at least 32 characters) in `backend/.env` and `lms/backend/.env`. `LMS_URL` (timesheet) and `TIMESHEET_URL` (LMS) point the two at each other.
+
+### Sign in with Keka account
+
+The timesheet login page has **Sign in with Keka account** (the same Keka OpenID Connect sign-in the LMS used). Keka verifies the person, and the API signs in the active timesheet employee with the same work email. Accounts are still created by the administrator; a Keka user without a timesheet account is refused. Fill in the `KEKA_*` settings in `backend/.env` (see `backend/.env.example`) and register `<API_PUBLIC_URL>/api/auth/keka/callback` with Keka as the redirect address. Until then the button explains that Keka sign-in is not set up. The LMS's **Sync from Keka** (Users & Teams) keeps working with the `KEKA_API_*` settings in `lms/backend/.env`.
 
 ## Architecture
 
