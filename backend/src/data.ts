@@ -203,9 +203,13 @@ export const toOvertime = (d: OvertimeLean): OvertimeRequest =>
 
 export type EntryStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'returned';
 
+export type EntryType = 'regular' | 'half_day' | 'overtime' | 'leave' | 'holiday';
+
 export interface TimesheetEntry {
   projectId: string;
   hours: number[];
+  /** Per-day label (Monday..Sunday), independent of the approval `status` below. */
+  entryTypes: EntryType[];
   description: string;
   status: EntryStatus;
   managerComment?: string;
@@ -237,6 +241,7 @@ export interface Timesheet {
 export interface EntryLean {
   projectId: string;
   hours: number[];
+  entryTypes?: EntryType[] | null;
   originalHours?: number[] | null;
   description?: string;
   status: EntryStatus;
@@ -270,6 +275,7 @@ export const toEntry = (e: EntryLean): TimesheetEntry =>
   compact<TimesheetEntry>({
     projectId: e.projectId,
     hours: e.hours,
+    entryTypes: e.entryTypes?.length === 7 ? e.entryTypes : Array(7).fill('regular'),
     description: e.description ?? '',
     status: e.status,
     managerComment: e.managerComment,

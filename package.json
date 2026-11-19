@@ -1,0 +1,12 @@
+{
+  "name": "timesheet-resource-management-root",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Root launcher — starts the backend (which serves the frontend itself via Vite middleware mode) and opens the browser on http://localhost:5032.",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run build --prefix frontend",
+    "start": "npm start --prefix backend"
+  }
+}

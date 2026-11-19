@@ -1,6 +1,5 @@
 import {
   BarChart3,
-  Briefcase,
   CalendarDays,
   CalendarRange,
   CheckSquare,
@@ -11,7 +10,6 @@ import {
   FolderKanban,
   LayoutDashboard,
   Network,
-  Plane,
   Settings,
   ShieldCheck,
   Timer,
@@ -41,13 +39,13 @@ export const NAVIGATION: Record<Role, NavItem[]> = {
     { label: 'Reports & Analytics', path: '/admin/reports', icon: BarChart3 },
     { label: 'Settings', path: '/admin/settings', icon: Settings },
   ],
+  // My Projects, My Calendar, Leave Requests and Overtime are intentionally not listed here — their
+  // routes, APIs and business logic are untouched (still reachable at /associate/projects etc.), only
+  // the sidebar entry point was removed per the simplified Associate nav (Dashboard/My Timesheet/My
+  // Submissions + My LMS, the last one rendered inline by Sidebar.tsx rather than from this array).
   associate: [
     { label: 'Dashboard', path: '/associate/dashboard', icon: LayoutDashboard },
-    { label: 'My Projects', path: '/associate/projects', icon: Briefcase },
     { label: 'My Timesheet', path: '/associate/timesheet', icon: Clock, badgeKey: 'returned' },
-    { label: 'My Calendar', path: '/associate/calendar', icon: CalendarDays },
-    { label: 'Leave Requests', path: '/associate/leave', icon: Plane },
-    { label: 'Overtime', path: '/associate/overtime', icon: Timer },
     { label: 'My Submissions', path: '/associate/submissions', icon: FileClock },
   ],
   manager: [

@@ -2,6 +2,7 @@ import type {
   Allocation,
   Employee,
   EntryStatus,
+  EntryType,
   Holiday,
   ISODate,
   LeaveDuration,
@@ -37,6 +38,19 @@ export function leaveHours(employee: Employee, calendar: WorkCalendar | undefine
   const daily = dailyTarget(employee, calendar);
   return duration === 'full' ? daily : daily / 2;
 }
+
+/** Preview only — the server recomputes this from the employee's own schedule on save. */
+export function halfDayHours(employee: Employee, calendar: WorkCalendar | undefined): number {
+  return dailyTarget(employee, calendar) / 2;
+}
+
+export const ENTRY_TYPE_LABEL: Record<EntryType, string> = {
+  regular: 'Regular',
+  half_day: 'Half day leave',
+  overtime: 'Overtime',
+  leave: 'Full day leave',
+  holiday: 'Holiday',
+};
 
 export interface DayExpectation {
   date: ISODate;

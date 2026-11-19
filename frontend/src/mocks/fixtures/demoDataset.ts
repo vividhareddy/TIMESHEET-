@@ -167,6 +167,7 @@ export function buildSampleDatabase(): MockDatabase {
         return {
           projectId: alloc.projectId,
           hours,
+          entryTypes: Array(7).fill('regular'),
           description: offset === 0 && pi === 2 ? '' : pool[(offset + pi) % pool.length],
           status,
           managerComment: REVIEW_COMMENTS[key],

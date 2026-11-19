@@ -61,6 +61,9 @@ export function dailyTarget(emp: EmployeeLike, cal: CalendarLike | undefined): n
 export const leaveHours = (emp: EmployeeLike, cal: CalendarLike | undefined, duration: 'full' | 'half'): number =>
   duration === 'full' ? dailyTarget(emp, cal) : dailyTarget(emp, cal) / 2;
 
+/** Hours auto-populated when a timesheet day is marked "Half Day" — half of the employee's own daily target. */
+export const halfDayHours = (emp: EmployeeLike, cal: CalendarLike | undefined): number => dailyTarget(emp, cal) / 2;
+
 export interface DayExpectation {
   date: string;
   working: boolean;

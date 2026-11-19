@@ -242,7 +242,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       },
       // ------------------------------------------------------- timesheets
       async saveTimesheet(weekStart: ISODate, entries: TimesheetEntry[], submit: boolean) {
-        const body = { weekStart, entries: entries.map(({ projectId, hours, description }) => ({ projectId, hours, description })) };
+        const body = { weekStart, entries: entries.map(({ projectId, hours, entryTypes, description }) => ({ projectId, hours, entryTypes, description })) };
         const saved = submit ? await timesheetService.submit(body) : await timesheetService.saveDraft(body);
         patch('timesheets', (l) => upsert(l, saved));
         if (submit) await refresh('overtime');

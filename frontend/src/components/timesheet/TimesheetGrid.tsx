@@ -1,13 +1,18 @@
 import { Fragment, useState } from 'react';
 import { AlertTriangle, ChevronDown, ChevronRight, Lock, MessageSquare, NotebookPen, Plane } from 'lucide-react';
-import type { Allocation, TimesheetEntry } from '@/types';
+import type { Allocation, EntryType, TimesheetEntry } from '@/types';
 import type { DayExpectation } from '@/utils/timesheet';
-import { dailyTotals, entryTotal, isEntryLocked } from '@/utils/timesheet';
+import { dailyTotals, ENTRY_TYPE_LABEL, entryTotal, isEntryLocked } from '@/utils/timesheet';
 import { DAY_SHORT, formatShort } from '@/utils/date';
 import { cn, formatHours, percent, roundToIncrement, sum } from '@/utils/format';
 import { useLookups } from '@/hooks/useLookups';
 import { StatusBadge } from '@/components/common/Badge';
 import { ProjectDot } from '@/components/common/Misc';
+
+const ENTRY_TYPE_ORDER: EntryType[] = ['regular', 'half_day', 'leave', 'holiday', 'overtime'];
+const ENTRY_TYPE_OPTIONS: Array<{ value: EntryType; label: string }> = ENTRY_TYPE_ORDER.map((value) => ({ value, label: ENTRY_TYPE_LABEL[value] }));
+
+const defaultEntryTypes = (): EntryType[] => Array(7).fill('regular');
 
 interface TimesheetGridProps {
   entries: TimesheetEntry[];
@@ -19,6 +24,8 @@ interface TimesheetGridProps {
   allowWeekendEntry: boolean;
   dailyThreshold: number;
   increment: number;
+  /** Preview hours for a day marked "Half day" — the server recomputes the authoritative value on save. */
+  halfDayHours: number;
   readOnly?: boolean;
   invalidDescriptions?: Set<string>;
 }
@@ -33,6 +40,7 @@ export function TimesheetGrid({
   allowWeekendEntry,
   dailyThreshold,
   increment,
+  halfDayHours,
   readOnly,
   invalidDescriptions,
 }: TimesheetGridProps) {
@@ -65,6 +73,16 @@ export function TimesheetGrid({
       return { ...e, hours };
     });
   };
+
+  const setType = (pid: string, i: number, type: EntryType) =>
+    update(pid, (e) => {
+      const entryTypes = [...(e.entryTypes?.length === 7 ? e.entryTypes : defaultEntryTypes())];
+      entryTypes[i] = type;
+      const hours = [...e.hours];
+      if (type === 'half_day') hours[i] = halfDayHours; // preview only; server is authoritative
+      else if (type === 'leave' || type === 'holiday') hours[i] = 0; // tracked separately; no project hours that day
+      return { ...e, entryTypes, hours };
+    });
 
   const colCount = dayIdx.length + 4;
 
@@ -140,6 +158,8 @@ export function TimesheetGrid({
                     const weekend = i > 4;
                     const disabled = locked || (weekend && !allowWeekendEntry);
                     const value = e.hours[i] ?? 0;
+                    const type = e.entryTypes?.[i] ?? 'regular';
+                    const hoursDisabled = disabled || type === 'half_day' || type === 'leave' || type === 'holiday';
                     return (
                       <td key={i} className={cn('px-1.5 py-2 text-center', (weekend || d.holiday) && 'bg-slate-50')}>
                         <input
@@ -148,7 +168,7 @@ export function TimesheetGrid({
                           min={0}
                           max={24}
                           step={increment}
-                          disabled={disabled}
+                          disabled={hoursDisabled}
                           aria-label={`${p?.name} ${DAY_SHORT[i]} hours`}
                           value={value === 0 ? '' : value}
                           placeholder="0"
@@ -156,12 +176,29 @@ export function TimesheetGrid({
                           onBlur={(ev) => setHour(e.projectId, i, ev.target.value, true)}
                           className={cn(
                             'no-spin h-9 w-full min-w-[52px] max-w-[68px] rounded-md border text-center text-sm tabular-nums transition-colors focus:outline-none focus:ring-2',
-                            disabled
+                            hoursDisabled
                               ? 'cursor-not-allowed border-transparent bg-transparent text-slate-600'
                               : 'border-slate-300 bg-white text-slate-800 focus:border-brand-500 focus:ring-brand-500/20',
-                            !disabled && value % increment !== 0 && 'border-amber-400',
+                            !hoursDisabled && value % increment !== 0 && 'border-amber-400',
                           )}
                         />
+                        <select
+                          disabled={disabled}
+                          aria-label={`${p?.name} ${DAY_SHORT[i]} entry type`}
+                          value={type}
+                          onChange={(ev) => setType(e.projectId, i, ev.target.value as EntryType)}
+                          className={cn(
+                            'no-spin mt-1 h-6 w-full min-w-[52px] max-w-[68px] rounded border bg-white text-center text-[10px] text-slate-500 transition-colors focus:outline-none focus:ring-1 focus:ring-brand-500/20',
+                            disabled ? 'cursor-not-allowed border-transparent bg-transparent' : 'border-slate-200',
+                            type !== 'regular' && 'font-medium text-brand-700',
+                          )}
+                        >
+                          {ENTRY_TYPE_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
                       </td>
                     );
                   })}
