@@ -372,7 +372,7 @@ function reportsTab(d){
 function complianceFirstPage(){compliance.pages={page:1,overduePage:1};compliance.open=null;render();}
 document.addEventListener('click',event=>document.querySelectorAll('.export-menu[open]').forEach(menu=>{if(!menu.contains(event.target))menu.open=false;}));
 async function complianceExport(format){
-  const {key,dir}=compliance.sort,response=await fetch('/api/manage/compliance/export'+qs({...compliance.filters,sort:key,dir,format}),{credentials:'same-origin',headers:{'X-Portal-Request':'1'}});
+  const {key,dir}=compliance.sort,response=await fetch('api/manage/compliance/export'+qs({...compliance.filters,sort:key,dir,format}),{credentials:'same-origin',headers:{'X-Portal-Request':'1'}});
   if(!response.ok)throw new Error((await response.json().catch(()=>({}))).error||'The report could not be exported.');
   const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');
   link.href=url;link.download=(/filename="([^"]+)"/.exec(response.headers.get('Content-Disposition')||'')||[])[1]||'shimentox-training-compliance.'+format;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
@@ -901,7 +901,7 @@ const CHANGES={
 async function uploadMaterial(file){
   if(file.size>50*1024*1024)throw new Error('Files must be 50 MB or smaller.');
   let response;
-  try{response=await fetch('/api/manage/materials',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/octet-stream','X-Portal-Request':'1','X-CSRF-Token':csrfToken,'X-File-Name':encodeURIComponent(file.name)},body:file});}
+  try{response=await fetch('api/manage/materials',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/octet-stream','X-Portal-Request':'1','X-CSRF-Token':csrfToken,'X-File-Name':encodeURIComponent(file.name)},body:file});}
   catch{throw new Error('Could not upload the file. Check your connection and try again.');}
   const data=await response.json().catch(()=>({}));
   if(!response.ok)throw new Error(data.error||'The file could not be uploaded.');

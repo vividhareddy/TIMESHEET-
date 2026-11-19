@@ -45,8 +45,17 @@ export const config = {
     api: trimSlash(process.env.API_PUBLIC_URL || `http://localhost:${port}`),
   },
   lms: {
-    /** The LMS portal ("My LMS" in the sidebar). */
-    url: trimSlash(process.env.LMS_URL || 'http://localhost:5007'),
+    /** The LMS portal ("My LMS" in the sidebar). This server proxies it under /lms on its own port. */
+    url: trimSlash(process.env.LMS_URL || `${trimSlash(process.env.APP_PUBLIC_URL || corsOrigin)}/lms`),
+
+    /** Loopback-only port the Python LMS listens on behind the /lms proxy. Browsers never use it directly. */
+    internalPort: Number(process.env.LMS_INTERNAL_PORT) || 5007,
+
+    /** Start the Python LMS together with this server (LMS_AUTOSTART=0 when it is run separately). */
+    autostart: process.env.LMS_AUTOSTART !== '0',
+
+    /** Python interpreter used to start the LMS. */
+    python: process.env.LMS_PYTHON || (process.platform === 'win32' ? 'python' : 'python3'),
 
     /** Shared with lms/backend/.env: signs the one-minute tickets that sign users in to the LMS. */
     ssoSecret: process.env.LMS_SSO_SECRET || '',

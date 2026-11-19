@@ -20,46 +20,40 @@ Each part has its own dependencies and is started from its own folder. The times
 ## Prerequisites
 
 - Node.js 20+ and npm
-- PostgreSQL running locally (default `localhost:5432`)
+- Python 3 with `pymongo` (for the LMS)
+- A MongoDB database (Atlas)
 
 ## Getting started
 
-### 1. Backend (API on http://localhost:5000)
+The whole application runs on **one port, http://localhost:5032**, from one command:
+
+| Address | What |
+|---|---|
+| http://localhost:5032/ | Timesheet UI (React, served by Express — Vite middleware in dev, `frontend/dist` in production) |
+| http://localhost:5032/api/ | Timesheet API |
+| http://localhost:5032/lms/ | ShimentoX LMS (proxied to the Python server) |
+
+Prerequisites: Node.js 20+, and Python 3 with `pymongo` (`pip install pymongo`) for the LMS.
 
 ```bash
+cd frontend && npm install && cd ..   # first time only
 cd backend
-cp .env.example .env      # first time only — then fill in PGPASSWORD, JWT_SECRET, etc.
-npm install
-npm run dev               # tsx watch — restarts on changes
+cp .env.example .env      # first time only — then fill in MONGODB_URI, JWT_SECRET, LMS_SSO_SECRET, etc.
+npm install               # first time only
+npm run dev               # tsx watch — restarts on changes; also starts the LMS
 ```
 
-`backend/.env` holds the database password and JWT secret. It is git-ignored and must never be committed. The database tables are created automatically on startup.
+`backend/.env` holds the database connection string and secrets. It is git-ignored and must never be committed.
+
+The Express server starts the Python LMS itself, listening on loopback only (`127.0.0.1:5007`, set with `LMS_INTERNAL_PORT`), and forwards `/lms/*` to it with the `/lms` prefix removed. Browsers never use that port. The LMS is told its prefix through `LMS_BASE_PATH=/lms` and trusts the forwarded client address (`LMS_TRUST_PROXY=1`) only from loopback. Related `backend/.env` settings: `LMS_PYTHON` (interpreter, default `python`), and `LMS_AUTOSTART=0` to start the LMS yourself instead (`cd lms && LMS_BASE_PATH=/lms LMS_TRUST_PROXY=1 python backend/server.py`). If the LMS is already running on the internal port (for example after `tsx watch` restarts the API), it is reused; after changing LMS Python code, stop that `python.exe` so it is started again.
 
 Check it is running:
 
-- http://localhost:5000/api/health — API liveness
-- http://localhost:5000/api/db-test — PostgreSQL connectivity
+- http://localhost:5032/api/health — API liveness
+- http://localhost:5032/api/db-test — MongoDB connectivity
+- http://localhost:5032/lms/api/session — LMS reachable through the proxy
 
-Production: `npm run build` then `npm start`.
-
-### 2. Frontend (UI on http://localhost:5172)
-
-In a second terminal:
-
-```bash
-cd frontend
-npm install
-npx vite --port 5172      # must match CORS_ORIGIN in backend/.env
-```
-
-### 3. LMS (http://localhost:5007)
-
-In a third terminal (needs Python 3 with `pymongo`: `pip install pymongo`):
-
-```bash
-cd lms
-npm run start:server      # or: python backend/server.py
-```
+Production: build the frontend (`cd frontend && npm run build`), then in `backend/` run `npm run build` and `NODE_ENV=production npm start`.
 
 `lms/backend/.env` holds the single sign-on secret (see below). The LMS reads `MONGODB_URI` / `MONGODB_DB_NAME` from `backend/.env` unless `LMS_MONGODB_URI` / `LMS_MONGODB_DB` are set, and creates its collections (prefixed `lms_`) and course catalogue on first start.
 
@@ -68,7 +62,7 @@ The frontend reads its environment from files in `frontend/`:
 | File | Purpose |
 |---|---|
 | `frontend/.env.example` | Template (committed) |
-| `frontend/.env.development` | Used by `npm run dev` — points at `http://localhost:5000/api` |
+| `frontend/.env.development` | Used in development — points at `/api` (same server and port) |
 | `frontend/.env.production` | Used by `npm run build` |
 
 If `frontend/.env.development` is missing, copy `frontend/.env.example` to it.
@@ -80,7 +74,7 @@ Other scripts: `npm run build` (type-check + production bundle in `frontend/dist
 | Variable | Values | Purpose |
 |---|---|---|
 | `VITE_API_MODE` | `api` (default) / `mock` | Real backend vs in-browser mock API |
-| `VITE_API_BASE_URL` | e.g. `http://localhost:5000/api` | Express API base URL |
+| `VITE_API_BASE_URL` | `/api` (default) | Express API base URL |
 
 **Mock mode** (`VITE_API_MODE=mock`, development only) is clearly labelled in the UI ("Mock API — not real data"). It starts with an **empty** database stored in the browser. From the sign-in page (or Admin → Settings → Data source) a developer can explicitly load an illustrative sample dataset or reset to empty, and quick-sign-in as any mock account (sample accounts use the password `Password@123`; employees created in mock mode use the temporary password the admin sets in the employee form). None of this exists in API mode, and `src/mocks` is excluded from production builds.
 
@@ -89,10 +83,10 @@ Other scripts: `npm run build` (type-check + production bundle in `frontend/dist
 The timesheet login is the only login. **My LMS** in the sidebar (every role) opens the LMS in a new tab, already signed in:
 
 1. The frontend calls `POST /api/lms/launch`. The API returns the LMS address with a ticket: an HS256 JWT signed with `LMS_SSO_SECRET`, valid for one minute and usable once, carrying the employee's email, name, role, designation, department, joining date, manager's email and direct reports' emails.
-2. The LMS verifies it at `GET /api/auth/timesheet`, creates or updates the LMS account (admin → Admin, manager → Manager, associate → Employee; LMS-only HR/Trainer roles are kept), links the manager and direct reports, and starts its own session. Learning history is never touched.
-3. Opening the LMS directly while signed out sends the browser to the timesheet sign-in. `http://localhost:5007/?local=1` still shows the LMS's own sign-in form for LMS-only accounts.
+2. The LMS verifies it at `GET /lms/api/auth/timesheet`, creates or updates the LMS account (admin → Admin, manager → Manager, associate → Employee; LMS-only HR/Trainer roles are kept), links the manager and direct reports, and starts its own session. Learning history is never touched.
+3. Opening the LMS directly while signed out sends the browser to the timesheet sign-in. `http://localhost:5032/lms/?local=1` still shows the LMS's own sign-in form for LMS-only accounts.
 
-`LMS_SSO_SECRET` must have the same value (at least 32 characters) in `backend/.env` and `lms/backend/.env`. `LMS_URL` (timesheet) and `TIMESHEET_URL` (LMS) point the two at each other.
+`LMS_SSO_SECRET` must have the same value (at least 32 characters) in `backend/.env` and `lms/backend/.env`. `LMS_URL` (timesheet, `http://localhost:5032/lms`) and `TIMESHEET_URL` (LMS, `http://localhost:5032`) point the two at each other. `LMS_PUBLIC_BASE_URL` in `lms/backend/.env` is the origin only (`http://localhost:5032`); `/lms` is added automatically.
 
 ### Sign in with Keka account
 

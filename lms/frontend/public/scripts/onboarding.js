@@ -109,7 +109,7 @@ function onboardingPage(){
 }
 
 async function onbExport(format){
-  const response=await fetch('/api/manage/onboarding/export'+qs({...onb.filters,format}),{credentials:'same-origin',headers:{'X-Portal-Request':'1'}});
+  const response=await fetch('api/manage/onboarding/export'+qs({...onb.filters,format}),{credentials:'same-origin',headers:{'X-Portal-Request':'1'}});
   if(!response.ok)throw new Error((await response.json().catch(()=>({}))).error||'The report could not be exported.');
   const link=document.createElement('a'),url=URL.createObjectURL(await response.blob());
   link.href=url;link.download=(/filename="([^"]+)"/.exec(response.headers.get('Content-Disposition')||'')||[])[1]||'shimentox-onboarding.'+format;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);

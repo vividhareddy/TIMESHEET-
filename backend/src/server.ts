@@ -19,11 +19,14 @@ import { organisationRouter } from './routes/organisation.js';
 import { calendarsRouter } from './routes/calendars.js';
 import { projectsRouter } from './routes/projects.js';
 import { lmsRouter } from './routes/lms.js';
+import { LMS_MOUNT, lmsProxy, startLms, stopLms } from './lmsProxy.js';
 
 const PORT = config.port;
 const CORS_ORIGIN = config.corsOrigin;
 
 export const app = express();
+// The LMS under /lms is proxied as-is (before the JSON body parser, so request bodies stream through untouched).
+app.use(lmsProxy);
 app.use(cors({ origin: CORS_ORIGIN }));
 app.use(express.json({ limit: '100kb' }));
 
@@ -187,7 +190,9 @@ async function main(): Promise<void> {
 
   server.listen(PORT, () => {
     console.log(`[api] Server listening on http://localhost:${PORT} (CORS origin: ${CORS_ORIGIN})`);
+    console.log(`[api] Timesheet: http://localhost:${PORT}/   LMS: http://localhost:${PORT}${LMS_MOUNT}/`);
     void startDatabase();
+    void startLms();
   });
 
   server.on('error', (err: NodeJS.ErrnoException) => {
@@ -202,11 +207,13 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     console.log(`[api] ${signal} received, shutting down.`);
     server.close();
+    stopLms();
     await disconnectMongo().catch(() => undefined);
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('exit', stopLms);
 }
 
 void main();

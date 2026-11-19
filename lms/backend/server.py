@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'src'))
 from database import initialize, seed_admin
 from deadlines import portal_timezone
-from server import PortalServer, PortalHandler
+from server import PortalServer, PortalHandler, base_path
 import reminders
 import store
 
@@ -38,6 +38,7 @@ def main():
     target = store.settings()['database']
     try:
         portal_timezone()
+        base_path()
     except ValueError as error:
         print(error, file=sys.stderr, flush=True)
         sys.exit(1)
@@ -54,7 +55,7 @@ def main():
         sys.exit(1)
     browser_host = 'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host
     url = f'http://{browser_host}:{server.server_port}'
-    print(f'ShimentoX LMS: {url}', flush=True)
+    print(f'ShimentoX LMS: {url}' + (f' (served to browsers under {base_path()}/ by the timesheet server)' if base_path() else ''), flush=True)
     print(f'MongoDB database: {target}', flush=True)
     if not os.environ.get('LMS_PUBLIC_BASE_URL', '').strip():
         print('Warning: LMS_PUBLIC_BASE_URL is unset. Certificate share links use the request host; LinkedIn cannot reach localhost or private network addresses.', file=sys.stderr, flush=True)

@@ -154,7 +154,7 @@ function trainersPanel(){
 // ---------------------------------------------------------------- downloads
 
 async function downloadCalendar(path){
-  const response=await fetch('/api/'+path,{credentials:'same-origin',headers:{'X-Portal-Request':'1'}});
+  const response=await fetch('api/'+path,{credentials:'same-origin',headers:{'X-Portal-Request':'1'}});
   if(!response.ok)throw new Error((await response.json().catch(()=>({}))).error||'The calendar file could not be downloaded.');
   const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');
   link.href=url;link.download=(/filename="([^"]+)"/.exec(response.headers.get('Content-Disposition')||'')||[])[1]||'shimentox-training.ics';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);

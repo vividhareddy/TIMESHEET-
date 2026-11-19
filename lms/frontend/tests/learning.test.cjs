@@ -24,7 +24,7 @@ async function main() {
     return elements[id] ||= { innerHTML: '', textContent: '', value: '', checked: false, disabled: false, dataset: {}, classList: classes(), handlers: {}, addEventListener(n, fn) { this.handlers[n] = fn; }, querySelector() { return element(id + '-submit') || (elements[id + '-submit'] ||= { disabled: false }); }, reset() {} };
   }
   async function fetch(url, options) {
-    const path = url.replace('/api/', ''), data = options.body ? JSON.parse(options.body) : {};
+    const path = url.replace(/^\/?api\//, ''), data = options.body ? JSON.parse(options.body) : {};
     requests.push({ path, data, options });
     assert.equal(options.credentials, 'same-origin');
     assert.equal(options.headers['X-Portal-Request'], '1');
@@ -129,7 +129,7 @@ async function main() {
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(app.innerHTML.includes('id="login-form"'));
   // Sign in with Keka account: a link to the server's Keka start route, and a clear message when Keka sign-in fails.
-  assert.ok(app.innerHTML.includes('href="/api/auth/keka/start"')&&app.innerHTML.includes('Sign in with Keka account'));
+  assert.ok(app.innerHTML.includes('href="api/auth/keka/start"')&&app.innerHTML.includes('Sign in with Keka account'));
   context.location.search='?signin_error=keka-inactive';context.location.pathname='/';run('render()');
   assert.ok(element('auth-error').textContent.includes('Your account is not active'));
   context.location.search='';

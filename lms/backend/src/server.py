@@ -42,6 +42,15 @@ API_VERSION = 15
 API_ATTEMPTS = 3
 
 
+def base_path():
+    """The URL path the portal is served under, e.g. '/lms' when the timesheet server proxies it there ('' at the root).
+    Requests arrive without it (the proxy strips it); it is added to every address the server hands to the browser."""
+    value = os.environ.get('LMS_BASE_PATH', '').strip().rstrip('/')
+    if value and not re.fullmatch(r'(?:/[A-Za-z0-9._-]+)+', value):
+        raise ValueError('LMS_BASE_PATH must look like /lms')
+    return value
+
+
 def transient(error):
     """A MongoDB error after which the whole transaction can safely be run again."""
     # Only errors after which nothing was saved: an uncertain commit is retried by Db.commit() itself, never by re-running the request.
@@ -92,7 +101,8 @@ class PortalHandler(SimpleHTTPRequestHandler):
         if sandbox:
             host = self.headers.get('Host', 'localhost:5007')
             host = host if re.fullmatch(r'[a-zA-Z0-9.\-\[\]:]+', host) else 'localhost:5007'
-            runtime = f'http://{host}/assets/python-runtime/ https://{host}/assets/python-runtime/'
+            runtime_path = f'{base_path()}/assets/python-runtime/'
+            runtime = f'http://{host}{runtime_path} https://{host}{runtime_path}'
             self.send_header('Content-Security-Policy', f"default-src 'none'; script-src 'self' {runtime} 'wasm-unsafe-eval'; worker-src blob:; connect-src {runtime}; frame-ancestors 'self'; base-uri 'none'; form-action 'none'; sandbox allow-scripts")
         else:
             self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; media-src 'self' https:; frame-src 'self' https://www.youtube-nocookie.com https://player.vimeo.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
@@ -120,7 +130,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
                   parsed.username is None and parsed.password is None and parsed.path in ('', '/') and
                   not parsed.query and not parsed.fragment,
                   'LMS_PUBLIC_BASE_URL must be an HTTP(S) website origin without a path.', 500)
-            return f'{parsed.scheme}://{parsed.netloc}'
+            return f'{parsed.scheme}://{parsed.netloc}{base_path()}'
 
         host = self.headers.get('Host', '')
         if not re.fullmatch(r'(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?', host):
@@ -128,14 +138,26 @@ class PortalHandler(SimpleHTTPRequestHandler):
         for candidate in (self.headers.get('Origin', ''), self.headers.get('Referer', '')):
             parsed = urlsplit(candidate)
             if parsed.scheme in ('http', 'https') and parsed.netloc.lower() == host.lower():
-                return f'{parsed.scheme}://{parsed.netloc}'
+                return f'{parsed.scheme}://{parsed.netloc}{base_path()}'
         forwarded = self.headers.get('X-Forwarded-Proto', '').lower()
         scheme = forwarded if forwarded in ('http', 'https') else 'http'
-        return f'{scheme}://{host}'
+        return f'{scheme}://{host}{base_path()}'
+
+    def client_ip(self):
+        """The browser's address. Behind the timesheet server's proxy (LMS_TRUST_PROXY=1) every connection comes from
+        loopback, so the address the proxy reports in X-Forwarded-For is used instead; it is trusted only from loopback."""
+        peer = self.client_address[0]
+        if os.environ.get('LMS_TRUST_PROXY') == '1' and ipaddress.ip_address(peer).is_loopback:
+            forwarded = self.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+            try:
+                return str(ipaddress.ip_address(forwarded.removeprefix('::ffff:')))
+            except ValueError:
+                pass
+        return peer
 
     def public_route_allowed(self):
         now_mono = time.monotonic()
-        address = self.client_address[0]
+        address = self.client_ip()
         with self.server.public_rate_lock:
             hits = self.server.public_rate_hits[address]
             while hits and now_mono - hits[0] >= 60:
@@ -204,11 +226,11 @@ class PortalHandler(SimpleHTTPRequestHandler):
 <meta property="og:url" content="{safe_link}"><meta property="og:image" content="{safe_image}">
 <meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image"><title>{title}</title>
-<link rel="stylesheet" href="/styles/main.css"><link rel="stylesheet" href="/styles/certificate.css">
+<link rel="stylesheet" href="{base_path()}/styles/main.css"><link rel="stylesheet" href="{base_path()}/styles/certificate.css">
 </head><body class="public-certificate"><main>
 <p class="certificate-status{status_class}">{status}</p>
 <article class="certificate" aria-label="Certificate of Completion">
-<div class="certificate-header"><img src="/assets/images/ShimentoX-Light-Logo.webp" alt="ShimentoX" width="960" height="169"><span>LEARNING &amp; DEVELOPMENT</span></div>
+<div class="certificate-header"><img src="{base_path()}/assets/images/ShimentoX-Light-Logo.webp" alt="ShimentoX" width="960" height="169"><span>LEARNING &amp; DEVELOPMENT</span></div>
 <div class="certificate-body"><div class="certificate-kicker">A COMMITMENT TO CONTINUOUS GROWTH</div>
 <h2>Certificate of Completion</h2><p class="certificate-presented">This certificate is proudly presented to</p>
 <h3 class="certificate-name">{name}</h3>
@@ -260,7 +282,8 @@ class PortalHandler(SimpleHTTPRequestHandler):
 
     def session_cookie(self, raw, lifetime):
         secure = '; Secure' if os.environ.get('LMS_COOKIE_SECURE') == '1' else ''
-        return f'{COOKIE}={raw}; Path=/; HttpOnly; SameSite=Lax; Max-Age={lifetime}{secure}'
+        path = base_path() or '/'
+        return f'{COOKIE}={raw}; Path={path}; HttpOnly; SameSite=Lax; Max-Age={lifetime}{secure}'
 
     def redirect(self, location, *cookies):
         self.send_response(302)
@@ -273,12 +296,12 @@ class PortalHandler(SimpleHTTPRequestHandler):
 
     def keka_state_cookie(self, value, lifetime):
         secure = '; Secure' if os.environ.get('LMS_COOKIE_SECURE') == '1' else ''
-        return f'{KEKA_COOKIE}={value}; Path=/api/auth/keka; HttpOnly; SameSite=Lax; Max-Age={lifetime}{secure}'
+        return f'{KEKA_COOKIE}={value}; Path={base_path()}/api/auth/keka; HttpOnly; SameSite=Lax; Max-Age={lifetime}{secure}'
 
     def keka_start(self):
         """Send the browser to Keka's sign-in page; Keka returns it to /api/auth/keka/callback."""
         if not keka.sso_ready():
-            return self.redirect('/?signin_error=keka-not-configured')
+            return self.redirect(f'{base_path()}/?signin_error=keka-not-configured')
         state = token()
         return self.redirect(keka.authorize_url(state, token(), keka.redirect_uri(self.public_base_url())), self.keka_state_cookie(state, 600))
 
@@ -287,32 +310,32 @@ class PortalHandler(SimpleHTTPRequestHandler):
         clear = self.keka_state_cookie('', 0)
         expected, state = self.cookie_value(KEKA_COOKIE), query.get('state', [''])[0]
         if query.get('error'):
-            return self.redirect('/?signin_error=keka-cancelled', clear)
+            return self.redirect(f'{base_path()}/?signin_error=keka-cancelled', clear)
         if not expected or not state or not hmac.compare_digest(expected, state):
-            return self.redirect('/?signin_error=keka-expired', clear)
+            return self.redirect(f'{base_path()}/?signin_error=keka-expired', clear)
         try:
-            payload, raw, lifetime = keka.sign_in(db, query.get('code', [''])[0], self.client_address[0], keka.redirect_uri(self.public_base_url()))
+            payload, raw, lifetime = keka.sign_in(db, query.get('code', [''])[0], self.client_ip(), keka.redirect_uri(self.public_base_url()))
         except keka.SignInError as error:
             db.commit()
-            return self.redirect(f'/?signin_error={error.code}', clear)
+            return self.redirect(f'{base_path()}/?signin_error={error.code}', clear)
         if user:
             db['sessions'].delete({'token_hash': user['token_hash']})
         db.commit()
-        return self.redirect('/', clear, self.session_cookie(raw, lifetime))
+        return self.redirect(f'{base_path()}/', clear, self.session_cookie(raw, lifetime))
 
     def timesheet_sign_in(self, db, user, query):
         """Single sign-on from the timesheet's "My LMS" link: verify the one-minute ticket and start an LMS session."""
         # Takes the write lock first, so the account update cannot conflict and the single-use ticket is never retried.
         db.begin(write=True)
         try:
-            payload, raw, lifetime = timesheet_sso.sign_in(db, query.get('ticket', [''])[0], self.client_address[0])
+            payload, raw, lifetime = timesheet_sso.sign_in(db, query.get('ticket', [''])[0], self.client_ip())
         except timesheet_sso.SignInError as error:
             db.rollback()
-            return self.redirect(f'/?signin_error={error.code}')
+            return self.redirect(f'{base_path()}/?signin_error={error.code}')
         if user:
             db['sessions'].delete({'token_hash': user['token_hash']})
         db.commit()
-        return self.redirect('/', self.session_cookie(raw, lifetime))
+        return self.redirect(f'{base_path()}/', self.session_cookie(raw, lifetime))
 
     def do_GET(self):
         path = urlsplit(self.path).path
@@ -446,12 +469,12 @@ class PortalHandler(SimpleHTTPRequestHandler):
         user = self.session(db)
         query = parse_qs(urlsplit(self.path).query)
         if method == 'GET' and path == '/api/session':
-            payload = {'user': candidate_view(user) if user else None, 'csrfToken': user['csrf_token'] if user else None,'setupRequired':not db['candidates'].exists({'role':'admin'}),'setupAllowed':ipaddress.ip_address(self.client_address[0]).is_loopback,'apiVersion':API_VERSION,'kekaSignIn':keka.sso_ready(),'timesheetUrl':timesheet_sso.timesheet_url() if timesheet_sso.enabled() else None}
+            payload = {'user': candidate_view(user) if user else None, 'csrfToken': user['csrf_token'] if user else None,'setupRequired':not db['candidates'].exists({'role':'admin'}),'setupAllowed':ipaddress.ip_address(self.client_ip()).is_loopback,'apiVersion':API_VERSION,'kekaSignIn':keka.sso_ready(),'timesheetUrl':timesheet_sso.timesheet_url() if timesheet_sso.enabled() else None}
         elif method=='POST' and path=='/api/setup/admin':
-            check(ipaddress.ip_address(self.client_address[0]).is_loopback,'Initial setup must be completed on the server computer.',403)
+            check(ipaddress.ip_address(self.client_ip()).is_loopback,'Initial setup must be completed on the server computer.',403)
             check(urlsplit('http://'+self.headers.get('Host','')).hostname in ('localhost','127.0.0.1','::1'),'Open the local portal address to complete setup.',403)
             setup_initial_admin(db,data)
-            payload,raw,lifetime=authenticate(db,data,self.client_address[0])
+            payload,raw,lifetime=authenticate(db,data,self.client_ip())
             db.commit()
             return self.json_response(201,payload,self.session_cookie(raw,lifetime))
         elif method == 'GET' and path == '/api/auth/keka/start':
@@ -461,7 +484,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
         elif method == 'GET' and path == '/api/auth/timesheet':
             return self.timesheet_sign_in(db, user, query)
         elif method == 'POST' and path in ('/api/auth/login', '/api/auth/register'):
-            payload, raw, lifetime = authenticate(db, data, self.client_address[0], path.endswith('register'))
+            payload, raw, lifetime = authenticate(db, data, self.client_ip(), path.endswith('register'))
             if user:
                 db['sessions'].delete({'token_hash': user['token_hash']})
             db.commit()
@@ -506,7 +529,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
                 for run in db['course_runs'].find({'candidate_id':candidate,'archived_at':None},['id']):
                     expire_exams(db, run['id'], 'You signed out during the exam.')
                 db['sessions'].delete({'token_hash': user['token_hash']})
-                auth_event(db, candidate, user['email'], 'logout', self.client_address[0])
+                auth_event(db, candidate, user['email'], 'logout', self.client_ip())
                 db.commit()
                 return self.json_response(200, {'ok': True}, self.session_cookie('', 0))
             if method == 'POST' and path == '/api/auth/password':
@@ -515,7 +538,7 @@ class PortalHandler(SimpleHTTPRequestHandler):
                 check(previous!=replacement,'Choose a new password different from the temporary or current password.')
                 db['candidates'].update({'id': candidate}, {'password_hash': password_hash(replacement), 'updated_at': now(), 'must_change_password': 0})
                 db['sessions'].delete({'candidate_id': candidate, 'token_hash': {'$ne': user['token_hash']}})
-                auth_event(db, candidate, user['email'], 'password_changed', self.client_address[0])
+                auth_event(db, candidate, user['email'], 'password_changed', self.client_ip())
                 from services import notify
                 notify(db, [candidate], 'account', 'Password changed successfully', 'Your account password has been updated.', 'account', f'password:{now()}')
                 payload = {'ok': True,'user':candidate_view(db['candidates'].get(candidate))}
