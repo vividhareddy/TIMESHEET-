@@ -1,11 +1,12 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import { AlertCircle, Clock3, Database, Eye, EyeOff, FlaskConical, Info, KeyRound, LogIn, RotateCcw, ShieldCheck } from 'lucide-react';
+import { useEffect, useState, type FormEvent, type InputHTMLAttributes, type ReactNode } from 'react';
+import { AlertCircle, ArrowRight, BarChart3, CheckCircle2, Clock3, Database, Eye, EyeOff, FlaskConical, Info, KeyRound, RotateCcw } from 'lucide-react';
 import type { Role } from '@/types';
 import { useSession } from '@/context/SessionContext';
 import { useToast } from '@/context/ToastContext';
 import { useApiQuery } from '@/hooks/useApiQuery';
 import { API_BASE_URL, ApiError, IS_MOCK_MODE, authService, mockControlService } from '@/services';
 import { Button } from '@/components/common/Button';
+import { cn } from '@/utils/format';
 import { Field, Input } from '@/components/forms/FormControls';
 import { Alert, Avatar } from '@/components/common/Misc';
 import { ErrorState, Spinner } from '@/components/common/StatusScreen';
@@ -13,6 +14,11 @@ import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 
 const ROLE_ORDER: Role[] = ['admin', 'manager', 'associate'];
 const ROLE_HEADINGS: Record<Role, string> = { admin: 'Administrators', manager: 'Project managers', associate: 'Associates' };
+
+/** Primary action on the sign-in page, in the app's brand blue. */
+const PRIMARY_BUTTON_CLASS =
+  'inline-flex h-[52px] w-full items-center justify-center gap-3 rounded-lg bg-brand-600 text-[15px] font-semibold text-white shadow-[0_8px_18px_-10px_rgba(39,76,131,0.8)] transition-colors hover:bg-brand-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-200 disabled:cursor-wait disabled:opacity-70';
+const SPINNER = <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" aria-hidden />;
 
 export function LoginPage() {
   const setup = useApiQuery(() => authService.setupStatus(), []);
@@ -23,49 +29,171 @@ export function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-slate-100 px-4 py-10">
-      <div className="mb-8 flex flex-col items-center gap-2 text-center">
-        <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-sidebar text-brand-200 shadow-card">
-          <Clock3 className="h-5 w-5" />
+    <div className="grid min-h-screen bg-slate-50 lg:h-screen lg:grid-cols-[1.1fr_1fr] lg:overflow-hidden">
+      <BrandPanel />
+
+      <main className="flex min-w-0 flex-col items-center bg-white px-6 py-10 sm:px-10 lg:overflow-y-auto lg:py-12">
+        <div className="my-auto w-full max-w-[450px]">
+          <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-brand-600">Welcome to TimeTrack Pro{IS_MOCK_MODE && <MockBadge />}</p>
+          <h1 className="mt-4 text-[34px] font-extrabold leading-tight tracking-tight text-slate-900 sm:text-[38px]">
+            Good to have you here.
+          </h1>
+          <p className="mt-2 text-[15px] text-slate-500">Sign in to keep your week on track.</p>
+
+          <div className="mt-8">
+            {setup.error ? (
+              <ErrorState title="Cannot reach the server" message={setup.error} onRetry={setup.reload} compact />
+            ) : !setup.data ? (
+              <Spinner label="Connecting…" className="py-6" />
+            ) : (
+              <EntryTabs needsSetup={setup.data.needsSetup} onAlreadySetUp={setup.reload} />
+            )}
+          </div>
+
+          <div className="mt-10 space-y-1.5 text-center text-xs text-slate-500">
+            <p>Your hours, supported by ShimentoX.</p>
+            <p>Need an account? Contact your administrator.</p>
+          </div>
+
+          {IS_MOCK_MODE && (
+            <div className="mt-8">
+              <MockPanel needsSetup={setup.data?.needsSetup} accounts={accounts.data ?? []} loading={accounts.loading} onChanged={reloadAll} />
+            </div>
+          )}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+/** Left half: the app's navy sidebar colour, the TimeTrack Pro mark and a few timesheet-themed illustration cards. */
+function BrandPanel() {
+  return (
+    <section className="relative flex flex-col overflow-hidden bg-sidebar px-6 py-8 text-white sm:px-10 lg:min-h-0 lg:justify-between lg:px-16 lg:py-12">
+      <span className="pointer-events-none absolute -bottom-48 -right-56 h-[620px] w-[620px] rounded-full border border-white/[0.06]" aria-hidden />
+      <span className="pointer-events-none absolute -left-32 -top-40 h-[420px] w-[420px] rounded-full bg-brand-600/10 blur-3xl" aria-hidden />
+
+      <div className="relative flex items-center gap-3">
+        <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-brand-600 text-white shadow-pop">
+          <Clock3 className="h-6 w-6" />
         </span>
+        <div className="leading-tight">
+          <p className="text-lg font-semibold text-white">TimeTrack Pro</p>
+          <p className="text-xs text-sidebar-muted">Project timesheets &amp; resource management</p>
+        </div>
+      </div>
+
+      <div className="relative mt-8 lg:mt-0">
+        <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-brand-200">Plan today. Deliver tomorrow.</p>
+        <h2 className="mt-4 max-w-[520px] text-3xl font-bold leading-[1.12] tracking-tight sm:text-4xl lg:text-[clamp(34px,5vh,48px)]">Make every hour count.</h2>
+        <p className="mt-4 max-w-[420px] text-[15px] leading-relaxed text-slate-300">
+          Log your project hours, track every approval and see exactly where your week went.
+        </p>
+        <TimesheetIllustration />
+      </div>
+
+      <p className="relative hidden text-xs text-sidebar-muted lg:block">Allocate people. Record hours. Route approvals.</p>
+    </section>
+  );
+}
+
+const DEMO_ROWS = [
+  { name: 'Kore.ai', color: '#3b6db3', hours: [4, 4, 4, 4, 4] },
+  { name: 'Zelis', color: '#0f8a7a', hours: [2, 2, 2, 2, 4] },
+  { name: 'Uber', color: '#7a5bb8', hours: [2, 2, 2, 2, 0] },
+];
+const DEMO_WEEKS = [
+  { logged: 36, allocated: 40 },
+  { logged: 40, allocated: 40 },
+  { logged: 32, allocated: 40 },
+  { logged: 38, allocated: 40 },
+  { logged: 40, allocated: 40 },
+  { logged: 40, allocated: 40 },
+];
+
+/** Illustration only: a weekly timesheet, an approval notice and a weekly-hours chart, in the app's own card style. */
+function TimesheetIllustration() {
+  const cardBase = 'login-float absolute overflow-hidden rounded-xl bg-white text-slate-700 shadow-[0_18px_40px_-12px_rgba(0,0,0,0.55)] ring-1 ring-black/5';
+  return (
+    <div
+      className="relative mx-auto mt-8 hidden h-[clamp(230px,38vh,330px)] w-full max-w-[520px] text-[clamp(9px,1.35vh,12px)] lg:block"
+      role="img"
+      aria-label="Illustration: a weekly timesheet with 40 hours across three projects, an approval notice and a weekly hours chart"
+    >
+      {/* Weekly timesheet */}
+      <div className={cn(cardBase, 'left-0 top-[4%] z-[2] w-[63%]')} style={{ ['--tilt' as string]: '-3deg' }}>
+        <div className="border-b border-slate-100 px-3.5 py-2.5">
+          <p className="font-semibold text-slate-900">My Timesheet</p>
+          <p className="mt-0.5 flex items-center gap-1.5 text-[0.85em] text-slate-500">
+            Week of 16 – 22 Nov
+            <span className="rounded-full bg-brand-50 px-1.5 py-px font-semibold text-brand-700 ring-1 ring-brand-100">Submitted</span>
+          </p>
+        </div>
+        <table className="w-full tabular-nums">
+          <thead>
+            <tr className="text-[0.85em] text-slate-400">
+              <th className="px-3.5 py-1.5 text-left font-medium">Project</th>
+              {['M', 'T', 'W', 'T', 'F'].map((d, i) => (
+                <th key={i} className="w-[9%] py-1.5 text-center font-medium">{d}</th>
+              ))}
+              <th className="px-3.5 py-1.5 text-right font-medium">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {DEMO_ROWS.map((r) => (
+              <tr key={r.name} className="border-t border-slate-100">
+                <td className="px-3.5 py-1.5">
+                  <span className="mr-1.5 inline-block h-2 w-2 rounded-sm align-middle" style={{ background: r.color }} />
+                  {r.name}
+                </td>
+                {r.hours.map((h, i) => (
+                  <td key={i} className={cn('py-1.5 text-center', h ? 'text-slate-700' : 'text-slate-300')}>{h || '–'}</td>
+                ))}
+                <td className="px-3.5 py-1.5 text-right font-semibold text-slate-900">{r.hours.reduce((a, b) => a + b, 0)}h</td>
+              </tr>
+            ))}
+            <tr className="border-t border-slate-200 bg-slate-50 font-semibold text-slate-900">
+              <td className="px-3.5 py-1.5">Total</td>
+              {[0, 1, 2, 3, 4].map((i) => (
+                <td key={i} className="py-1.5 text-center">{DEMO_ROWS.reduce((a, r) => a + r.hours[i]!, 0)}</td>
+              ))}
+              <td className="px-3.5 py-1.5 text-right text-brand-700">40h</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* Approval notice */}
+      <div className={cn(cardBase, 'right-0 top-0 z-[3] flex w-[39%] items-start gap-2.5 px-3.5 py-3')} style={{ ['--tilt' as string]: '4deg', animationDelay: '-2s' }}>
+        <CheckCircle2 className="mt-0.5 h-[1.6em] w-[1.6em] shrink-0 text-emerald-600" />
         <div>
-          <p className="text-xl font-bold tracking-tight text-slate-900">ShimentoX</p>
-          <p className="text-sm font-medium text-brand-600">TimeTrack Pro</p>
+          <p className="font-semibold text-slate-900">Hours approved</p>
+          <p className="text-[0.9em] text-slate-500">Kore.ai · 20h this week</p>
         </div>
-        {IS_MOCK_MODE && <MockBadge />}
       </div>
 
-      <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 shadow-pop">
-        {setup.error ? (
-          <ErrorState title="Cannot reach the server" message={setup.error} onRetry={setup.reload} compact />
-        ) : !setup.data ? (
-          <Spinner label="Connecting…" className="py-6" />
-        ) : (
-          <EntryTabs needsSetup={setup.data.needsSetup} onAlreadySetUp={setup.reload} />
-        )}
-      </div>
-
-      <p className="mt-6 max-w-md text-center text-xs text-slate-500">
-        Allocate people to client projects, record weekly hours and route each project's hours to its project manager for approval.
-      </p>
-
-      {IS_MOCK_MODE && (
-        <div className="mt-8 w-full max-w-2xl">
-          <MockPanel
-            needsSetup={setup.data?.needsSetup}
-            accounts={accounts.data ?? []}
-            loading={accounts.loading}
-            onChanged={reloadAll}
-          />
+      {/* Weekly hours chart */}
+      <div className={cn(cardBase, 'bottom-[2%] right-0 z-[1] w-[39%] px-3.5 py-3')} style={{ ['--tilt' as string]: '-2deg', animationDelay: '-4s' }}>
+        <div className="flex items-center gap-1.5 font-semibold text-slate-900">
+          <BarChart3 className="h-[1.3em] w-[1.3em] text-brand-600" /> Weekly hours
         </div>
-      )}
+        <div className="mt-2 flex h-[clamp(40px,7vh,64px)] items-end justify-between gap-1.5">
+          {DEMO_WEEKS.map((w, i) => (
+            <div key={i} className="flex h-full flex-1 items-end gap-[2px]">
+              <span className="w-1/2 rounded-t-sm bg-slate-200" style={{ height: `${(w.allocated / 40) * 100}%` }} />
+              <span className="w-1/2 rounded-t-sm bg-brand-500" style={{ height: `${(w.logged / 40) * 100}%` }} />
+            </div>
+          ))}
+        </div>
+        <p className="mt-1.5 text-[0.85em] text-slate-500">Logged vs allocated</p>
+      </div>
     </div>
   );
 }
 
 function MockBadge() {
   return (
-    <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800" title="Requests are served by the in-browser development mock API">
+    <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 align-middle text-[11px] font-semibold normal-case tracking-normal text-amber-800" title="Requests are served by the in-browser development mock API">
       <FlaskConical className="h-3 w-3" /> Mock API
     </span>
   );
@@ -81,7 +209,7 @@ function EntryTabs({ needsSetup, onAlreadySetUp }: { needsSetup: boolean; onAlre
 
   const tabClass = (t: 'signin' | 'setup') =>
     `flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-      active === t ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+      active === t ? 'bg-white text-slate-900 shadow-sm ring-1 ring-slate-200' : 'text-slate-500 hover:text-slate-700'
     }`;
 
   return (
@@ -159,6 +287,33 @@ function takeKekaReturn() {
 }
 let kekaExchangeStarted = false;
 
+/** Larger label + field used by the sign-in form (the app's shared form controls are compact). */
+function LoginField({ id, label, error, children }: { id: string; label: string; error?: string; children: ReactNode }) {
+  return (
+    <div>
+      <label htmlFor={id} className="mb-2 block text-sm font-semibold text-slate-800">
+        {label}
+      </label>
+      {children}
+      {error && <p className="mt-1.5 text-xs text-rose-600">{error}</p>}
+    </div>
+  );
+}
+
+function LoginInput({ invalid, className, ...rest }: InputHTMLAttributes<HTMLInputElement> & { invalid?: boolean }) {
+  return (
+    <input
+      {...rest}
+      aria-invalid={invalid || undefined}
+      className={cn(
+        'block h-[52px] w-full rounded-lg border bg-white px-4 text-[15px] text-slate-900 placeholder:text-slate-400 transition-shadow focus:outline-none focus:ring-4',
+        invalid ? 'border-rose-400 focus:border-rose-500 focus:ring-rose-100' : 'border-slate-200 focus:border-brand-500 focus:ring-brand-100',
+        className,
+      )}
+    />
+  );
+}
+
 function LoginForm() {
   const { login, kekaLogin, notice } = useSession();
   const [email, setEmail] = useState('');
@@ -209,15 +364,7 @@ function LoginForm() {
   };
 
   return (
-    <form onSubmit={submit} className="space-y-4" noValidate>
-      <div className="flex items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-brand-50 text-brand-600"><LogIn className="h-5 w-5" /></span>
-        <div>
-          <h2 className="text-base font-semibold text-slate-900">Sign in</h2>
-          <p className="text-sm text-slate-500">Use your work email and password. You will be taken to the workspace for your role.</p>
-        </div>
-      </div>
-
+    <form onSubmit={submit} className="space-y-5" noValidate>
       {notice && !error && <Alert tone="info" icon={Info}>{notice}</Alert>}
       {error && (
         <Alert tone={error.tone} icon={AlertCircle} title={error.title}>
@@ -225,8 +372,9 @@ function LoginForm() {
         </Alert>
       )}
 
-      <Field label="Work email" required error={fieldErrors.email}>
-        <Input
+      <LoginField id="login-email" label="Work email" error={fieldErrors.email}>
+        <LoginInput
+          id="login-email"
           type="email"
           autoComplete="username"
           autoFocus
@@ -236,13 +384,14 @@ function LoginForm() {
             setEmail(e.target.value);
             if (fieldErrors.email) setFieldErrors((f) => ({ ...f, email: undefined }));
           }}
-          placeholder="name@company.com"
+          placeholder="you@shimento.com"
         />
-      </Field>
+      </LoginField>
 
-      <Field label="Password" required error={fieldErrors.password}>
+      <LoginField id="login-password" label="Password" error={fieldErrors.password}>
         <div className="relative">
-          <Input
+          <LoginInput
+            id="login-password"
             type={showPassword ? 'text' : 'password'}
             autoComplete="current-password"
             value={password}
@@ -251,31 +400,32 @@ function LoginForm() {
               setPassword(e.target.value);
               if (fieldErrors.password) setFieldErrors((f) => ({ ...f, password: undefined }));
             }}
-            className="pr-10"
+            placeholder="Enter your password"
+            className="pr-14"
           />
           <button
             type="button"
             onClick={() => setShowPassword((s) => !s)}
-            className="absolute inset-y-0 right-0 flex w-9 items-center justify-center rounded-r-md text-slate-400 hover:text-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/30"
+            className="absolute right-2 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-200"
             aria-label={showPassword ? 'Hide password' : 'Show password'}
             title={showPassword ? 'Hide password' : 'Show password'}
           >
-            {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
           </button>
         </div>
-      </Field>
+      </LoginField>
 
       <div className="flex items-center justify-between gap-3">
-        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+        <label className="flex cursor-pointer items-center gap-2.5 text-sm text-slate-600">
           <input
             type="checkbox"
             checked={rememberMe}
             onChange={(e) => setRememberMe(e.target.checked)}
             className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500/30"
           />
-          Remember me
+          Keep me signed in
         </label>
-        <button type="button" onClick={() => setShowForgot((s) => !s)} className="text-sm font-medium text-brand-600 hover:text-brand-700 hover:underline">
+        <button type="button" onClick={() => setShowForgot((s) => !s)} className="text-sm font-semibold text-brand-600 hover:text-brand-700 hover:underline">
           Forgot password?
         </button>
       </div>
@@ -286,26 +436,31 @@ function LoginForm() {
         </Alert>
       )}
 
-      <Button type="submit" icon={LogIn} loading={busy} disabled={kekaBusy} className="w-full">Sign in</Button>
+      <button type="submit" disabled={busy || kekaBusy} className={PRIMARY_BUTTON_CLASS}>
+        {busy ? SPINNER : null}
+        Sign In
+        {!busy && <ArrowRight className="h-5 w-5" />}
+      </button>
 
       {!IS_MOCK_MODE && (
         <>
-          <div className="flex items-center gap-3 text-xs uppercase tracking-wide text-slate-400" role="separator">
+          <div className="flex items-center gap-4 text-xs font-medium uppercase tracking-widest text-slate-400" role="separator">
             <span className="h-px flex-1 bg-slate-200" />or<span className="h-px flex-1 bg-slate-200" />
           </div>
           <a
             href={`${API_BASE_URL}/auth/keka/start`}
             onClick={() => setKekaBusy(true)}
             aria-disabled={kekaBusy}
-            className="flex w-full items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/30 aria-disabled:pointer-events-none aria-disabled:opacity-60"
+            className="flex h-[54px] w-full items-center justify-center gap-3 rounded-lg border border-slate-200 bg-white text-base font-semibold text-slate-800 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-100 aria-disabled:pointer-events-none aria-disabled:opacity-60"
           >
-            {kekaBusy ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-brand-600" aria-hidden /> : <KeyRound className="h-4 w-4" />}
+            {kekaBusy ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-brand-600" aria-hidden /> : <KeyRound className="h-5 w-5" />}
             Sign in with Keka account
           </a>
-          <p className="text-center text-xs text-slate-500">Use the same email and password you use for Keka. The same sign-in also opens your LMS.</p>
+          <p className="rounded-lg border border-brand-100 bg-brand-50 px-4 py-3.5 text-sm leading-relaxed text-slate-600">
+            Use the same email and password you use for Keka. The same sign-in also opens your LMS.
+          </p>
         </>
       )}
-      <p className="text-center text-xs text-slate-500">Accounts are created by your administrator. There is no self-registration.</p>
     </form>
   );
 }
@@ -381,12 +536,9 @@ function SetupForm({ onAlreadySetUp }: { onAlreadySetUp: () => void }) {
 
   return (
     <form onSubmit={submit} className="space-y-4">
-      <div className="flex items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-brand-50 text-brand-600"><ShieldCheck className="h-5 w-5" /></span>
-        <div>
-          <h2 className="text-base font-semibold text-slate-900">Set up your organisation</h2>
-          <p className="text-sm text-slate-500">The database is empty. Create the first administrator account to get started — you will then add calendars, employees and projects.</p>
-        </div>
+      <div>
+        <h2 className="text-lg font-bold text-slate-900">Set up your organisation</h2>
+        <p className="mt-1 text-sm text-slate-500">The database is empty. Create the first administrator account to get started — you will then add calendars, employees and projects.</p>
       </div>
       {error && <Alert tone="danger">{error}</Alert>}
       <Field label="Organisation name" required error={fieldErrors.organisationName}>
@@ -403,7 +555,11 @@ function SetupForm({ onAlreadySetUp }: { onAlreadySetUp: () => void }) {
       <Field label="Password" required error={fieldErrors.password} hint="At least 8 characters.">
         <Input type="password" autoComplete="new-password" value={form.password} onChange={(e) => set('password', e.target.value)} required minLength={8} />
       </Field>
-      <Button type="submit" loading={busy} className="w-full">Create administrator account</Button>
+      <button type="submit" disabled={busy} className={PRIMARY_BUTTON_CLASS}>
+        {busy && SPINNER}
+        Create administrator account
+        {!busy && <ArrowRight className="h-5 w-5" />}
+      </button>
     </form>
   );
 }
