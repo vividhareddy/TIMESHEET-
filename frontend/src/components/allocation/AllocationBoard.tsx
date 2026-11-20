@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Pencil, Plus, Trash2 } from 'lucide-react';
 import type { Allocation, Employee } from '@/types';
 import { useAppData } from '@/context/AppDataContext';
@@ -54,6 +54,14 @@ export function AllocationBoard({ projectIds }: Props) {
   const scope = useMemo(() => new Set(projectIds ?? projects.map((p) => p.id)), [projectIds, projects]);
   const scopedProjects = projects.filter((p) => scope.has(p.id));
   const canEdit = (a: Allocation) => scope.has(a.projectId);
+  const editingAllowed = !editing || scope.has(editing.projectId);
+  const removingAllowed = removing !== null && scope.has(removing.projectId);
+
+  useEffect(() => {
+    if (projectFilter !== 'all' && !scope.has(projectFilter)) setProjectFilter('all');
+    if (!editingAllowed) setEditing(undefined);
+    if (!removingAllowed) setRemoving(null);
+  }, [scope, projectFilter, editingAllowed, removingAllowed]);
 
   const active = activeAllocationsOn(allocations, today);
 
@@ -265,9 +273,9 @@ export function AllocationBoard({ projectIds }: Props) {
         )}
       </Card>
 
-      <AllocationFormModal open={editing !== undefined} allocation={editing} defaults={defaults} projectIds={projectIds} onClose={() => setEditing(undefined)} />
+      <AllocationFormModal open={editing !== undefined && editingAllowed} allocation={editing} defaults={defaults} projectIds={projectIds} onClose={() => setEditing(undefined)} />
       <ConfirmDialog
-        open={!!removing}
+        open={removingAllowed}
         title="Remove allocation?"
         tone="danger"
         confirmLabel="Remove"
@@ -275,7 +283,7 @@ export function AllocationBoard({ projectIds }: Props) {
         message={removing && `${employeeName(removing.employeeId)} will no longer be allocated to ${project(removing.projectId)?.name} (${formatHours(removing.weeklyHours)}/week). Submitted timesheets are not affected.`}
         onCancel={() => setRemoving(null)}
         onConfirm={async () => {
-          if (!removing) return;
+          if (!removing || !canEdit(removing)) return;
           const ok = await run(() => deleteAllocation(removing.id), { title: 'Allocation removed' });
           if (ok) setRemoving(null);
         }}

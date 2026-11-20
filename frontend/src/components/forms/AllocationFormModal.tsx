@@ -71,8 +71,10 @@ export function AllocationFormModal({ open, allocation, defaults, projectIds, on
 
   const selectableProjects = projects.filter((p) => (projectIds ? projectIds.includes(p.id) : true) && (p.status === 'active' || p.id === form.projectId));
   const selectableEmployees = employees.filter((e) => e.status === 'active' && e.systemRole !== 'admin');
+  const projectAllowed = !projectIds || projectIds.includes(form.projectId);
 
   const submit = async () => {
+    if (!projectAllowed) return;
     setBusy(true);
     setErrors({});
     setFormError(null);
@@ -98,7 +100,7 @@ export function AllocationFormModal({ open, allocation, defaults, projectIds, on
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button onClick={submit} loading={busy}>{allocation ? 'Save changes' : 'Allocate'}</Button>
+          <Button onClick={submit} loading={busy} disabled={!projectAllowed}>{allocation ? 'Save changes' : 'Allocate'}</Button>
         </>
       }
     >

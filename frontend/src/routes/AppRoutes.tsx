@@ -1,8 +1,9 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import type { Role } from '@/types';
 import { useSession } from '@/context/SessionContext';
-import { AppDataProvider } from '@/context/AppDataContext';
+import { AppDataProvider, useAppData } from '@/context/AppDataContext';
+import { useToast } from '@/context/ToastContext';
 import { AppLayout } from '@/layouts/AppLayout';
 import { homePath } from './navigation';
 import { LoginPage } from '@/pages/LoginPage';
@@ -37,15 +38,70 @@ import { OvertimeApprovalsPage } from '@/pages/manager/OvertimeApprovalsPage';
 import { ManagerReportsPage } from '@/pages/manager/ManagerReportsPage';
 import { TeamCalendarPage } from '@/pages/manager/TeamCalendarPage';
 
+const MANAGER_REFRESH_PAGES = new Set(['/manager/dashboard', '/manager/team', '/manager/allocation']);
+
+function ManagerLayout({ pathname, navigationKey }: { pathname: string; navigationKey: string }) {
+  const { refresh } = useAppData();
+  const toast = useToast();
+  const page = pathname.replace(/\/$/, '').toLowerCase();
+  // The workspace has already fetched these collections before rendering this layout.
+  const previousLocation = useRef({ page, navigationKey });
+  const initialRedirect = useRef(page === '/manager');
+  const inFlight = useRef(false);
+
+  useEffect(() => {
+    const previous = previousLocation.current;
+    const entered = previous.page !== page || previous.navigationKey !== navigationKey;
+    previousLocation.current = { page, navigationKey };
+    const redirectedFromInitialIndex = initialRedirect.current && previous.page === '/manager' && page === '/manager/dashboard';
+    if (entered) initialRedirect.current = false;
+    if (!MANAGER_REFRESH_PAGES.has(page)) return;
+
+    const update = async () => {
+      if (inFlight.current) return;
+      inFlight.current = true;
+      try {
+        await refresh('projects', 'employees', 'allocations');
+      } catch {
+        toast.error('Could not refresh manager data', 'Showing the last loaded data.');
+      } finally {
+        inFlight.current = false;
+      }
+    };
+
+    const isForeground = () => document.visibilityState === 'visible' && document.hasFocus();
+    let wasForeground = isForeground();
+    const onForegroundChange = () => {
+      const foreground = isForeground();
+      const returned = foreground && !wasForeground;
+      wasForeground = foreground;
+      if (returned) void update();
+    };
+
+    if (entered && !redirectedFromInitialIndex) void update();
+    document.addEventListener('visibilitychange', onForegroundChange);
+    window.addEventListener('focus', onForegroundChange);
+    window.addEventListener('blur', onForegroundChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onForegroundChange);
+      window.removeEventListener('focus', onForegroundChange);
+      window.removeEventListener('blur', onForegroundChange);
+    };
+  }, [page, navigationKey, refresh, toast]);
+
+  return <AppLayout role="manager" />;
+}
+
 /** Only users whose role matches the section may enter; others are sent to their own workspace. */
 function RoleGuard({ role }: { role: Role }) {
   const { user } = useSession();
-  const { pathname } = useLocation();
+  const { pathname, key } = useLocation();
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [pathname]);
   if (!user) return null;
   if (user.systemRole !== role) return <Navigate to={homePath(user.systemRole)} replace />;
+  if (role === 'manager') return <ManagerLayout pathname={pathname} navigationKey={key} />;
   return <AppLayout role={role} />;
 }
 
