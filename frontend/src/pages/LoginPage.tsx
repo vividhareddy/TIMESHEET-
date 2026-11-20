@@ -17,7 +17,7 @@ const ROLE_HEADINGS: Record<Role, string> = { admin: 'Administrators', manager: 
 
 /** Primary action on the sign-in page, in the app's brand blue. */
 const PRIMARY_BUTTON_CLASS =
-  'inline-flex h-[52px] w-full items-center justify-center gap-3 rounded-lg bg-brand-600 text-[15px] font-semibold text-white shadow-[0_8px_18px_-10px_rgba(39,76,131,0.8)] transition-colors hover:bg-brand-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-200 disabled:cursor-wait disabled:opacity-70';
+  'inline-flex h-[clamp(40px,6.4vh,52px)] w-full items-center justify-center gap-3 rounded-lg bg-brand-600 text-[15px] font-semibold text-white shadow-[0_8px_18px_-10px_rgba(39,76,131,0.8)] transition-colors hover:bg-brand-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-200 disabled:cursor-wait disabled:opacity-70';
 const SPINNER = <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" aria-hidden />;
 
 export function LoginPage() {
@@ -32,15 +32,15 @@ export function LoginPage() {
     <div className="grid min-h-screen bg-slate-50 lg:h-screen lg:grid-cols-[1.1fr_1fr] lg:overflow-hidden">
       <BrandPanel />
 
-      <main className="flex min-w-0 flex-col items-center bg-white px-6 py-10 sm:px-10 lg:overflow-y-auto lg:py-12">
+      <main className="no-scrollbar flex min-w-0 flex-col items-center bg-white px-6 py-10 sm:px-10 lg:overflow-y-auto lg:py-[clamp(12px,3vh,48px)]">
         <div className="my-auto w-full max-w-[450px]">
           <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-brand-600">Welcome to TimeTrack Pro{IS_MOCK_MODE && <MockBadge />}</p>
-          <h1 className="mt-4 text-[34px] font-extrabold leading-tight tracking-tight text-slate-900 sm:text-[38px]">
+          <h1 className="mt-[clamp(6px,1.5vh,16px)] text-[34px] font-extrabold leading-tight tracking-tight text-slate-900 sm:text-[38px] lg:text-[clamp(26px,4.6vh,38px)]">
             Good to have you here.
           </h1>
-          <p className="mt-2 text-[15px] text-slate-500">Sign in to keep your week on track.</p>
+          <p className="mt-[clamp(2px,0.8vh,8px)] text-[15px] text-slate-500">Sign in to keep your week on track.</p>
 
-          <div className="mt-8">
+          <div className="mt-[clamp(14px,3vh,32px)]">
             {setup.error ? (
               <ErrorState title="Cannot reach the server" message={setup.error} onRetry={setup.reload} compact />
             ) : !setup.data ? (
@@ -50,10 +50,7 @@ export function LoginPage() {
             )}
           </div>
 
-          <div className="mt-10 space-y-1.5 text-center text-xs text-slate-500">
-            <p>Your hours, supported by ShimentoX.</p>
-            <p>Need an account? Contact your administrator.</p>
-          </div>
+          <p className="mt-[clamp(12px,3vh,40px)] text-center text-xs text-slate-500">Need an account? Contact your administrator.</p>
 
           {IS_MOCK_MODE && (
             <div className="mt-8">
@@ -291,7 +288,7 @@ let kekaExchangeStarted = false;
 function LoginField({ id, label, error, children }: { id: string; label: string; error?: string; children: ReactNode }) {
   return (
     <div>
-      <label htmlFor={id} className="mb-2 block text-sm font-semibold text-slate-800">
+      <label htmlFor={id} className="mb-[clamp(4px,0.9vh,8px)] block text-sm font-semibold text-slate-800">
         {label}
       </label>
       {children}
@@ -306,7 +303,7 @@ function LoginInput({ invalid, className, ...rest }: InputHTMLAttributes<HTMLInp
       {...rest}
       aria-invalid={invalid || undefined}
       className={cn(
-        'block h-[52px] w-full rounded-lg border bg-white px-4 text-[15px] text-slate-900 placeholder:text-slate-400 transition-shadow focus:outline-none focus:ring-4',
+        'block h-[clamp(40px,6.2vh,52px)] w-full rounded-lg border bg-white px-4 text-[15px] text-slate-900 placeholder:text-slate-400 transition-shadow focus:outline-none focus:ring-4',
         invalid ? 'border-rose-400 focus:border-rose-500 focus:ring-rose-100' : 'border-slate-200 focus:border-brand-500 focus:ring-brand-100',
         className,
       )}
@@ -364,7 +361,7 @@ function LoginForm() {
   };
 
   return (
-    <form onSubmit={submit} className="space-y-5" noValidate>
+    <form onSubmit={submit} className="flex flex-col gap-[clamp(10px,2.1vh,20px)]" noValidate>
       {notice && !error && <Alert tone="info" icon={Info}>{notice}</Alert>}
       {error && (
         <Alert tone={error.tone} icon={AlertCircle} title={error.title}>
@@ -451,12 +448,12 @@ function LoginForm() {
             href={`${API_BASE_URL}/auth/keka/start`}
             onClick={() => setKekaBusy(true)}
             aria-disabled={kekaBusy}
-            className="flex h-[54px] w-full items-center justify-center gap-3 rounded-lg border border-slate-200 bg-white text-base font-semibold text-slate-800 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-100 aria-disabled:pointer-events-none aria-disabled:opacity-60"
+            className="flex h-[clamp(40px,6.4vh,52px)] w-full items-center justify-center gap-3 rounded-lg border border-slate-200 bg-white text-base font-semibold text-slate-800 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-100 aria-disabled:pointer-events-none aria-disabled:opacity-60"
           >
             {kekaBusy ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-brand-600" aria-hidden /> : <KeyRound className="h-5 w-5" />}
             Sign in with Keka account
           </a>
-          <p className="rounded-lg border border-brand-100 bg-brand-50 px-4 py-3.5 text-sm leading-relaxed text-slate-600">
+          <p className="rounded-lg border border-brand-100 bg-brand-50 px-4 py-[clamp(8px,1.4vh,14px)] text-[13px] leading-relaxed text-slate-600">
             Use the same email and password you use for Keka. The same sign-in also opens your LMS.
           </p>
         </>
