@@ -31,3 +31,18 @@ export const canSee = (scope: Set<string> | 'all', employeeId: string) => scope 
 export function calendarOf(employee: Employee) {
   return db().calendars.find((c) => c.id === employee.calendarId);
 }
+
+/**
+ * Colleagues whose leave can clash with the user's in [from, to]: people on the same projects in that period, people
+ * with the same reporting manager, the user's manager and direct reports. Active employees only; never the user.
+ */
+export function leaveTeammateIds(user: Employee, from: string, to: string): Set<string> {
+  const overlaps = (a: { startDate: string; endDate: string }) => a.startDate <= to && a.endDate >= from;
+  const myProjects = new Set(db().allocations.filter((a) => a.employeeId === user.id && overlaps(a)).map((a) => a.projectId));
+  const ids = new Set(db().allocations.filter((a) => myProjects.has(a.projectId) && overlaps(a)).map((a) => a.employeeId));
+  for (const e of db().employees) {
+    if (e.managerId === user.id || (user.managerId && (e.managerId === user.managerId || e.id === user.managerId))) ids.add(e.id);
+  }
+  ids.delete(user.id);
+  return new Set([...ids].filter((id) => db().employees.find((e) => e.id === id)?.status === 'active'));
+}

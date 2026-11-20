@@ -1,11 +1,11 @@
 /** Timesheet, approval, leave and overtime workflows — the rules the Express backend must enforce. */
 import type { ApprovalEvent, Employee, LeaveRequest, OvertimeRequest, Timesheet, TimesheetEntry } from '@/types';
-import type { ApprovalItem, LeaveApplyRequest, ModifyHoursRequest, OvertimeCreateRequest, ReviewRequest, SaveTimesheetRequest } from '@/types/api';
+import type { ApprovalItem, LeaveApplyRequest, TeamAvailability, ModifyHoursRequest, OvertimeCreateRequest, ReviewRequest, SaveTimesheetRequest } from '@/types/api';
 import { currentWeekStart, startOfWeek } from '@/utils/date';
 import { sum } from '@/utils/format';
 import { allocationsForWeek, computeOvertime, entryTotal, expectedWeekHours, isEntryLocked, isWorkingDay, leaveHours, timesheetTotal } from '@/utils/timesheet';
 import { badRequest, conflict, forbidden, newId, notFound, required, route } from '../http';
-import { calendarOf, canSee, db, managedProjectIds, visibleEmployeeIds } from './scope';
+import { calendarOf, canSee, db, leaveTeammateIds, managedProjectIds, visibleEmployeeIds } from './scope';
 
 const nowIso = () => new Date().toISOString();
 
@@ -282,6 +282,21 @@ export const workflowRoutes = [
       return db().leaves.filter((l) => l.employeeId === user.id || reports.has(l.employeeId) || canSee(scope, l.employeeId));
     }
     return db().leaves.filter((l) => l.employeeId === user.id);
+  }),
+  route('GET', '/leave-requests/team-availability', (req): TeamAvailability => {
+    const month = req.query.month ?? '';
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw badRequest('month must be in the form YYYY-MM.', { month: 'Use YYYY-MM.' });
+    const from = `${month}-01`;
+    const to = `${month}-${String(new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate()).padStart(2, '0')}`;
+    const ids = leaveTeammateIds(req.user!, from, to);
+    const byDate = new Map<string, TeamAvailability['days'][number]['people']>();
+    for (const l of db().leaves) {
+      if (!ids.has(l.employeeId) || l.date < from || l.date > to || (l.status !== 'pending' && l.status !== 'approved')) continue;
+      const list = byDate.get(l.date) ?? [];
+      list.push({ name: db().employees.find((e) => e.id === l.employeeId)?.name ?? 'A teammate', duration: l.duration, status: l.status });
+      byDate.set(l.date, list);
+    }
+    return { month, teamSize: ids.size, days: [...byDate.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, people]) => ({ date, people })) };
   }),
   route('POST', '/leave-requests', (req) => {
     const body = req.body as LeaveApplyRequest;

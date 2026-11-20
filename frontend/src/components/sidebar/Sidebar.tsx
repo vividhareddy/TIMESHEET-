@@ -1,11 +1,10 @@
-import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { Clock3, ExternalLink, GraduationCap, X } from 'lucide-react';
 import type { Role } from '@/types';
 import { NAVIGATION } from '@/routes/navigation';
 import { useReferenceData } from '@/hooks/useLookups';
-import { IS_MOCK_MODE, lmsService } from '@/services';
-import { useToast } from '@/context/ToastContext';
+import { IS_MOCK_MODE } from '@/services';
+import { useLmsLauncher } from '@/hooks/useLmsLauncher';
 import { useNotifications } from '@/hooks/useNotifications';
 import { useAppData } from '@/context/AppDataContext';
 import { cn } from '@/utils/format';
@@ -82,35 +81,11 @@ export function Sidebar({ role, open, onClose }: SidebarProps) {
   );
 }
 
-/**
- * "My LMS": opens the learning portal in a new tab, already signed in with the timesheet account.
- * The tab is opened immediately (so pop-up blockers allow it) and pointed at the single sign-on address once the
- * API has issued the one-minute ticket.
- */
+/** "My LMS": opens the learning portal in a new tab, already signed in with the timesheet account. */
 function MyLmsLink({ onOpened }: { onOpened: () => void }) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-
+  const { open: launch, busy } = useLmsLauncher();
   const open = async () => {
-    if (busy) return;
-    setBusy(true);
-    const tab = window.open('', '_blank');
-    if (tab) {
-      tab.opener = null;
-      tab.document.title = 'Opening My LMS…';
-      tab.document.body.innerHTML = '<p style="font:14px system-ui,sans-serif;color:#475569;margin:2rem">Opening My LMS…</p>';
-    }
-    try {
-      const { url } = await lmsService.launch();
-      if (tab) tab.location.replace(url);
-      else window.location.assign(url);
-      onOpened();
-    } catch (err) {
-      tab?.close();
-      toast.error('Could not open My LMS', err instanceof Error ? err.message : undefined);
-    } finally {
-      setBusy(false);
-    }
+    if (await launch()) onOpened();
   };
 
   return (

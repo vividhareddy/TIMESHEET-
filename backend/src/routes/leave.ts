@@ -10,7 +10,7 @@ import { HttpError, assertId, assertValid, isISODate, str, uniqueViolation } fro
 import { loadCalendars, lockDoc, toLeave, type LeaveLean } from '../data.js';
 import { EmployeeModel } from '../models/employee.js';
 import { LeaveRequestModel } from '../models/requests.js';
-import { directReportIds, visibleEmployeeIds } from '../scope.js';
+import { directReportIds, leaveTeammateIds, visibleEmployeeIds } from '../scope.js';
 import { isWorkingDay, leaveHours } from '../lib/workCalc.js';
 
 export const leaveRouter = Router();
@@ -28,6 +28,42 @@ leaveRouter.get('/', async (_req, res) => {
     list = list.filter((l) => l.employeeId === user.id);
   }
   res.json(list);
+});
+
+/**
+ * GET /api/leave-requests/team-availability?month=YYYY-MM — when the user's teammates (see leaveTeammateIds) are on
+ * leave that month, so the assistant can suggest clash-free days. Pending and approved leave only; it returns names,
+ * dates and full/half day, never reasons.
+ */
+leaveRouter.get('/team-availability', async (req, res) => {
+  const user = currentUser(res);
+  const month = str(req.query.month);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new HttpError(400, 'month must be in the form YYYY-MM.', { month: 'Use YYYY-MM.' });
+  const year = Number(month.slice(0, 4));
+  const mon = Number(month.slice(5, 7));
+  const from = `${month}-01`;
+  const to = `${month}-${String(new Date(Date.UTC(year, mon, 0)).getUTCDate()).padStart(2, '0')}`;
+
+  const ids = [...(await leaveTeammateIds(user, from, to))];
+  const [people, leaves] = await Promise.all([
+    EmployeeModel.find({ organisationId: user.organisationId, _id: { $in: ids } }).select('name').lean<{ _id: string; name: string }[]>(),
+    LeaveRequestModel.find({ organisationId: user.organisationId, employeeId: { $in: ids }, date: { $gte: from, $lte: to }, status: { $in: ['pending', 'approved'] } })
+      .select('employeeId date duration status')
+      .lean<{ employeeId: string; date: string; duration: 'full' | 'half'; status: 'pending' | 'approved' }[]>(),
+  ]);
+  const names = new Map(people.map((p) => [String(p._id), p.name]));
+  const byDate = new Map<string, { name: string; duration: 'full' | 'half'; status: 'pending' | 'approved' }[]>();
+  for (const l of leaves) {
+    const list = byDate.get(l.date) ?? [];
+    list.push({ name: names.get(l.employeeId) ?? 'A teammate', duration: l.duration, status: l.status });
+    byDate.set(l.date, list);
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    month,
+    teamSize: people.length,
+    days: [...byDate.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, onLeave]) => ({ date, people: onLeave })),
+  });
 });
 
 /** POST /api/leave-requests — { date, duration: 'full' | 'half', reason } */

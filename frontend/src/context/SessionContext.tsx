@@ -3,6 +3,7 @@ import type { Employee } from '@/types';
 import type { LoginRequest, SetupRequest } from '@/types/api';
 import { ApiError, authService } from '@/services';
 import { onUnauthorized } from '@/services/api';
+import { markSignedIn } from '@/components/assistant/greeting';
 
 /**
  * Authentication state. The signed-in user always comes from the API
@@ -79,6 +80,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signedIn = useCallback((u: Employee) => {
+    markSignedIn();
     setUser(u);
     setError(null);
     setNotice(null);

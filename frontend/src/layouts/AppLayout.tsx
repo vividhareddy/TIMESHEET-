@@ -6,6 +6,7 @@ import { Sidebar } from '@/components/sidebar/Sidebar';
 import { Topbar } from '@/components/sidebar/Topbar';
 import { Alert } from '@/components/common/Misc';
 import { useOptionalAppData } from '@/context/AppDataContext';
+import { AssistantWidget } from '@/components/assistant/AssistantWidget';
 
 export function AppLayout({ role }: { role: Role }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -24,6 +25,7 @@ export function AppLayout({ role }: { role: Role }) {
           <Outlet />
         </main>
       </div>
+      <AssistantWidget role={role} />
     </div>
   );
 }

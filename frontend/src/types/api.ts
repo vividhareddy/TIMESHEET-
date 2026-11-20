@@ -189,6 +189,13 @@ export interface WorkLocationInput {
 
 // ------------------------------------------------------------------- leave
 
+/** GET /leave-requests/team-availability — teammates' leave in a month (names, dates and duration; never reasons). */
+export interface TeamAvailability {
+  month: string; // YYYY-MM
+  teamSize: number;
+  days: { date: ISODate; people: { name: string; duration: LeaveDuration; status: 'pending' | 'approved' }[] }[];
+}
+
 export interface LeaveApplyRequest {
   date: ISODate;
   duration: LeaveDuration;
