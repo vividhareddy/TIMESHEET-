@@ -5,11 +5,19 @@ import { js, jsonSchema, mondayDate, uuidId } from './common.js';
 export const ENTRY_STATUSES = ['draft', 'pending', 'approved', 'rejected', 'returned'] as const;
 export const EVENT_ACTIONS = ['saved', 'submitted', 'resubmitted', 'approved', 'rejected', 'returned', 'modified', 'reopened'] as const;
 
+/** Per-day label on a timesheet entry — independent of the approval `status` above. */
+export const ENTRY_TYPES = ['regular', 'half_day', 'overtime', 'leave', 'holiday'] as const;
+
 const sevenDays = (allowNull: boolean) => ({
   validator: (hours: number[] | null | undefined) =>
     hours == null || hours.length === 0 ? allowNull : hours.length === 7 && hours.every((h) => typeof h === 'number' && h >= 0 && h <= 24),
   message: '{PATH} must hold 7 daily values between 0 and 24 (Monday–Sunday).',
 });
+
+const sevenEntryTypes = {
+  validator: (types: string[] | null | undefined) => types == null || types.length === 0 || (types.length === 7 && types.every((t) => (ENTRY_TYPES as readonly string[]).includes(t))),
+  message: '{PATH} must hold 7 daily entry types (Monday–Sunday).',
+};
 
 /**
  * One row per project on a weekly timesheet; hours[0..6] = Monday..Sunday. Approved per project.
@@ -20,6 +28,8 @@ const entrySchema = new Schema(
   {
     projectId: { type: String, required: true, ref: 'Project' },
     hours: { type: [Number], required: true, validate: sevenDays(false) },
+    /** Per-day label (regular/half_day/overtime/leave); defaults to 'regular' for every day. */
+    entryTypes: { type: [String], default: () => Array(7).fill('regular'), validate: sevenEntryTypes },
     /** The employee's hours before an approver modified them; unset when never modified. */
     originalHours: { type: [Number], default: undefined, validate: sevenDays(true) },
     description: { type: String, default: '' },
@@ -74,6 +84,7 @@ export const timesheetValidator = jsonSchema(['organisationId', 'employeeId', 'w
       properties: {
         projectId: js.string,
         hours: hoursArray,
+        entryTypes: { bsonType: 'array', minItems: 7, maxItems: 7, items: js.enum(ENTRY_TYPES) },
         originalHours: hoursArray,
         description: js.string,
         status: js.enum(ENTRY_STATUSES),

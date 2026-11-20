@@ -25,7 +25,9 @@ import { TimesheetEvent, TimesheetModel, type EVENT_ACTIONS } from '../models/ti
 import { canSee, managedProjectIds, visibleEmployeeIds } from '../scope.js';
 import { readPolicy, readSettings, type OvertimePolicy } from './organisation.js';
 import { addDays, currentWeekStart, startOfWeek, sum, weekDates } from '../lib/dates.js';
-import { allocationsForWeek, computeOvertime, dailyTotals, entryTotal, expectedWeekHours, leaveHours } from '../lib/workCalc.js';
+import { allocationsForWeek, computeOvertime, dailyTotals, entryTotal, expectedWeekHours, halfDayHours, leaveHours } from '../lib/workCalc.js';
+import { ENTRY_TYPES } from '../models/timesheet.js';
+import type { EntryType } from '../data.js';
 
 const MAX_DESCRIPTION = 2000;
 
@@ -36,6 +38,16 @@ function validateHours(hours: unknown, increment: number): number[] {
     if (!Number.isFinite(v) || v < 0 || v > 24) throw new HttpError(400, 'Daily hours must be between 0 and 24.');
     if (Math.abs(v / increment - Math.round(v / increment)) > 1e-9) throw new HttpError(400, `Hours must be in ${increment}-hour increments.`);
     return v;
+  });
+}
+
+/** Defaults to 7 days of 'regular' when omitted, so older clients keep working unchanged. */
+function validateEntryTypes(entryTypes: unknown): EntryType[] {
+  if (entryTypes === undefined) return Array(7).fill('regular') as EntryType[];
+  if (!Array.isArray(entryTypes) || entryTypes.length !== 7) throw new HttpError(400, 'Each entry needs 7 daily entry types (Monday–Sunday).');
+  return entryTypes.map((t) => {
+    if (!(ENTRY_TYPES as readonly string[]).includes(String(t))) throw new HttpError(400, `Unknown entry type "${t}".`);
+    return t as EntryType;
   });
 }
 
@@ -125,6 +137,9 @@ async function saveOwnTimesheet(user: AuthUser, body: unknown, submit: boolean):
       const calendars = await loadCalendars(org, session);
       const calendar = calendars.get(user.calendarId);
       const leaves = (await loadApprovedLeaves(org, weekStart, weekEnd, session)).filter((l) => l.employeeId === user.id);
+      // Authoritative half-day value — the client's auto-calculated figure is a preview only; the
+      // server recomputes it from the employee's own schedule so the two can never drift apart.
+      const halfDay = halfDayHours(user, calendar);
 
       const seen = new Set<string>();
       const entries: TimesheetEntry[] = inputs.map((input) => {
@@ -134,7 +149,12 @@ async function saveOwnTimesheet(user: AuthUser, body: unknown, submit: boolean):
         if (!allowed.has(projectId)) throw new HttpError(403, 'You can only record time on projects you are allocated to for this week.');
         const prev = existing.entries.find((e) => e.projectId === projectId);
         if (prev && isEntryLocked(prev.status)) return prev; // locked entries are never changed by the employee
-        const hours = validateHours(input.hours, settings.hourIncrement);
+        const entryTypes = validateEntryTypes(input.entryTypes);
+        const hours = validateHours(input.hours, settings.hourIncrement).map((h, i) => {
+          if (entryTypes[i] === 'half_day') return halfDay; // server-computed, never trusts the client's value
+          if (entryTypes[i] === 'leave' || entryTypes[i] === 'holiday') return 0; // tracked separately; no project hours that day
+          return h;
+        });
         const description = str(input.description);
         if (description.length > MAX_DESCRIPTION) throw new HttpError(400, `Work descriptions can be at most ${MAX_DESCRIPTION} characters.`);
         if (!settings.allowWeekendEntry && (hours[5]! > 0 || hours[6]! > 0)) throw new HttpError(400, 'Weekend entries are not allowed by your organisation.');
@@ -146,7 +166,7 @@ async function saveOwnTimesheet(user: AuthUser, body: unknown, submit: boolean):
           if (outside >= 0) throw new HttpError(400, `${names.get(projectId) ?? 'This project'}: you are not allocated to it on ${dates[outside]}.`);
         }
         const { managerComment, originalHours, reviewedBy, reviewedAt } = prev ?? {};
-        return { projectId, hours, description, status: prev?.status ?? 'draft', managerComment, originalHours, reviewedBy, reviewedAt } as TimesheetEntry;
+        return { projectId, hours, entryTypes, description, status: prev?.status ?? 'draft', managerComment, originalHours, reviewedBy, reviewedAt } as TimesheetEntry;
       });
       // Locked entries omitted from the payload are preserved.
       for (const prev of existing.entries) if (isEntryLocked(prev.status) && !seen.has(prev.projectId)) entries.push(prev);
@@ -202,6 +222,7 @@ async function saveOwnTimesheet(user: AuthUser, body: unknown, submit: boolean):
         return defined({
           projectId: e.projectId,
           hours: e.hours,
+          entryTypes: e.entryTypes,
           originalHours: prev?.originalHours?.length ? prev.originalHours : undefined,
           description: e.description,
           status: e.status,

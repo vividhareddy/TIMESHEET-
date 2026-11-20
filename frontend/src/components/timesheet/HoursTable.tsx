@@ -1,7 +1,7 @@
 import type { Allocation, ISODate, TimesheetEntry, WorkCalendar } from '@/types';
 import { DAY_SHORT, formatShort, weekDates } from '@/utils/date';
 import { cn, formatHours, sum } from '@/utils/format';
-import { dailyTotals, entryTotal, findHoliday } from '@/utils/timesheet';
+import { dailyTotals, ENTRY_TYPE_LABEL, entryTotal, findHoliday } from '@/utils/timesheet';
 import { useLookups } from '@/hooks/useLookups';
 import { StatusBadge } from '@/components/common/Badge';
 import { ProjectDot } from '@/components/common/Misc';
@@ -57,9 +57,11 @@ export function HoursTable({ entries, weekStart, calendar, allocations = [], sho
                 </td>
                 {dayIdx.map((i) => {
                   const changed = e.originalHours && e.originalHours[i] !== e.hours[i];
+                  const type = e.entryTypes?.[i] ?? 'regular';
                   return (
                     <td key={i} className={cn('px-2 py-2 text-center tabular-nums', i > 4 && 'bg-slate-50', changed && 'font-semibold text-violet-700')} title={changed ? `Originally ${formatHours(e.originalHours![i])}` : undefined}>
                       {e.hours[i] ? formatHours(e.hours[i], false) : <span className="text-slate-300">–</span>}
+                      {type !== 'regular' && <div className="text-[10px] font-medium uppercase text-brand-600">{ENTRY_TYPE_LABEL[type]}</div>}
                     </td>
                   );
                 })}

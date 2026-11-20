@@ -23,42 +23,42 @@ export function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex h-16 max-w-6xl items-center gap-3 px-6">
-          <span className="flex h-8 w-8 items-center justify-center rounded-md bg-sidebar text-brand-200">
-            <Clock3 className="h-[18px] w-[18px]" />
-          </span>
-          <p className="text-sm font-semibold text-slate-900">TimeTrack Pro</p>
-          {IS_MOCK_MODE && <MockBadge />}
+    <div className="flex min-h-screen flex-col items-center justify-center bg-slate-100 px-4 py-10">
+      <div className="mb-8 flex flex-col items-center gap-2 text-center">
+        <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-sidebar text-brand-200 shadow-card">
+          <Clock3 className="h-5 w-5" />
+        </span>
+        <div>
+          <p className="text-xl font-bold tracking-tight text-slate-900">ShimentoX</p>
+          <p className="text-sm font-medium text-brand-600">TimeTrack Pro</p>
         </div>
-      </header>
+        {IS_MOCK_MODE && <MockBadge />}
+      </div>
 
-      <main className="mx-auto grid max-w-6xl gap-8 px-6 py-12 lg:grid-cols-[1fr_420px]">
-        <div className="max-w-xl">
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Project Timesheet & Resource Management</h1>
-          <p className="mt-2 text-sm text-slate-500">Allocate people to client projects, record weekly hours and route each project's hours to its project manager for approval.</p>
+      <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 shadow-pop">
+        {setup.error ? (
+          <ErrorState title="Cannot reach the server" message={setup.error} onRetry={setup.reload} compact />
+        ) : !setup.data ? (
+          <Spinner label="Connecting…" className="py-6" />
+        ) : (
+          <EntryTabs needsSetup={setup.data.needsSetup} onAlreadySetUp={setup.reload} />
+        )}
+      </div>
 
-          <div className="mt-8 rounded-lg border border-slate-200 bg-white p-6 shadow-card">
-            {setup.error ? (
-              <ErrorState title="Cannot reach the server" message={setup.error} onRetry={setup.reload} compact />
-            ) : !setup.data ? (
-              <Spinner label="Connecting…" className="py-6" />
-            ) : (
-              <EntryTabs needsSetup={setup.data.needsSetup} onAlreadySetUp={setup.reload} />
-            )}
-          </div>
-        </div>
+      <p className="mt-6 max-w-md text-center text-xs text-slate-500">
+        Allocate people to client projects, record weekly hours and route each project's hours to its project manager for approval.
+      </p>
 
-        {IS_MOCK_MODE && (
+      {IS_MOCK_MODE && (
+        <div className="mt-8 w-full max-w-2xl">
           <MockPanel
             needsSetup={setup.data?.needsSetup}
             accounts={accounts.data ?? []}
             loading={accounts.loading}
             onChanged={reloadAll}
           />
-        )}
-      </main>
+        </div>
+      )}
     </div>
   );
 }

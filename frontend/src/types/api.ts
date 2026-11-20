@@ -9,6 +9,7 @@ import type {
   CountryCode,
   Employee,
   EntryStatus,
+  EntryType,
   HolidayType,
   ISODate,
   LeaveDuration,
@@ -105,6 +106,8 @@ export interface TimesheetQuery {
 export interface TimesheetEntryInput {
   projectId: string;
   hours: number[];
+  /** Defaults to 7 days of 'regular' when omitted. */
+  entryTypes?: EntryType[];
   description: string;
 }
 

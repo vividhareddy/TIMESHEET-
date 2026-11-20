@@ -62,6 +62,9 @@ export interface Allocation {
 
 export type EntryStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'returned';
 
+/** Per-day label (Monday..Sunday), independent of the approval `status` below. */
+export type EntryType = 'regular' | 'half_day' | 'overtime' | 'leave' | 'holiday';
+
 export type TimesheetStatus =
   | 'not_started'
   | 'draft'
@@ -75,6 +78,8 @@ export interface TimesheetEntry {
   projectId: string;
   /** Hours for Monday..Sunday (index 0 = Monday). */
   hours: number[];
+  /** Per-day label (regular/half_day/overtime/leave), Monday..Sunday. */
+  entryTypes: EntryType[];
   description: string;
   status: EntryStatus;
   managerComment?: string;

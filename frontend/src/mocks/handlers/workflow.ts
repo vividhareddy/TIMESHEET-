@@ -1,9 +1,9 @@
 /** Timesheet, approval, leave and overtime workflows — the rules the Express backend must enforce. */
-import type { ApprovalEvent, Employee, LeaveRequest, OvertimeRequest, Timesheet, TimesheetEntry } from '@/types';
-import type { ApprovalItem, LeaveApplyRequest, TeamAvailability, ModifyHoursRequest, OvertimeCreateRequest, ReviewRequest, SaveTimesheetRequest } from '@/types/api';
+import type { ApprovalEvent, Employee, EntryType, LeaveRequest, OvertimeRequest, Timesheet, TimesheetEntry } from '@/types';
+import type { ApprovalItem, LeaveApplyRequest, ModifyHoursRequest, OvertimeCreateRequest, ReviewRequest, SaveTimesheetRequest, TeamAvailability } from '@/types/api';
 import { currentWeekStart, startOfWeek } from '@/utils/date';
 import { sum } from '@/utils/format';
-import { allocationsForWeek, computeOvertime, entryTotal, expectedWeekHours, isEntryLocked, isWorkingDay, leaveHours, timesheetTotal } from '@/utils/timesheet';
+import { allocationsForWeek, computeOvertime, entryTotal, expectedWeekHours, halfDayHours, isEntryLocked, isWorkingDay, leaveHours, timesheetTotal } from '@/utils/timesheet';
 import { badRequest, conflict, forbidden, newId, notFound, required, route } from '../http';
 import { calendarOf, canSee, db, leaveTeammateIds, managedProjectIds, visibleEmployeeIds } from './scope';
 
@@ -61,6 +61,18 @@ function validateHours(hours: unknown, increment: number): number[] {
   });
 }
 
+const ENTRY_TYPES: EntryType[] = ['regular', 'half_day', 'overtime', 'leave', 'holiday'];
+
+/** Defaults to 7 days of 'regular' when omitted, so older clients keep working unchanged. */
+function validateEntryTypes(entryTypes: unknown): EntryType[] {
+  if (entryTypes === undefined) return Array(7).fill('regular');
+  if (!Array.isArray(entryTypes) || entryTypes.length !== 7) throw badRequest('Each entry needs 7 daily entry types (Monday–Sunday).');
+  return entryTypes.map((t) => {
+    if (!ENTRY_TYPES.includes(t)) throw badRequest(`Unknown entry type "${t}".`);
+    return t as EntryType;
+  });
+}
+
 function saveOwnTimesheet(user: Employee, body: SaveTimesheetRequest, submit: boolean): Timesheet {
   required(body as unknown as Record<string, unknown>, { weekStart: 'Week' });
   const weekStart = startOfWeek(body.weekStart);
@@ -71,13 +83,22 @@ function saveOwnTimesheet(user: Employee, body: SaveTimesheetRequest, submit: bo
     ...(existing?.entries.map((e) => e.projectId) ?? []),
   ]);
 
+  // Authoritative half-day value — the client's auto-calculated figure is a preview only; the
+  // server recomputes it from the employee's own schedule so the two can never drift apart.
+  const halfDay = halfDayHours(user, calendarOf(user));
+
   const entries: TimesheetEntry[] = (body.entries ?? []).map((input) => {
     if (!allowedProjects.has(input.projectId)) throw forbidden('You can only record time on projects you are allocated to for this week.');
     const prev = existing?.entries.find((e) => e.projectId === input.projectId);
     if (prev && isEntryLocked(prev.status)) return prev; // locked entries are never changed by the employee
-    const hours = validateHours(input.hours, settings.hourIncrement);
+    const entryTypes = validateEntryTypes(input.entryTypes);
+    const hours = validateHours(input.hours, settings.hourIncrement).map((h, i) => {
+      if (entryTypes[i] === 'half_day') return halfDay; // server-computed, never trusts the client's value
+      if (entryTypes[i] === 'leave' || entryTypes[i] === 'holiday') return 0; // tracked separately; no project hours that day
+      return h;
+    });
     if (!settings.allowWeekendEntry && hours[5] + hours[6] > 0) throw badRequest('Weekend entries are not allowed by your organisation.');
-    return { ...prev, projectId: input.projectId, hours, description: String(input.description ?? '').trim(), status: prev?.status ?? 'draft' };
+    return { ...prev, projectId: input.projectId, hours, entryTypes, description: String(input.description ?? '').trim(), status: prev?.status ?? 'draft' };
   });
   // Locked entries omitted from the payload are preserved.
   for (const prev of existing?.entries ?? []) if (isEntryLocked(prev.status) && !entries.some((e) => e.projectId === prev.projectId)) entries.push(prev);

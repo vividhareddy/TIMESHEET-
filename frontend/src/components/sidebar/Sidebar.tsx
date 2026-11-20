@@ -73,7 +73,7 @@ export function Sidebar({ role, open, onClose }: SidebarProps) {
               </NavLink>
             );
           })}
-          {!IS_MOCK_MODE && <MyLmsLink onOpened={onClose} />}
+          {!IS_MOCK_MODE && <MyLmsLink onOpened={onClose} variant={role === 'associate' ? 'nav' : 'footer'} />}
         </nav>
         {IS_MOCK_MODE && <div className="border-t border-sidebar-border px-5 py-3 text-[11px] text-amber-300">Development mock API — data is not real</div>}
       </aside>
@@ -81,8 +81,8 @@ export function Sidebar({ role, open, onClose }: SidebarProps) {
   );
 }
 
-/** "My LMS": opens the learning portal in a new tab, already signed in with the timesheet account. */
-function MyLmsLink({ onOpened }: { onOpened: () => void }) {
+/** "My LMS": opens the learning portal in a new tab, already signed in with the timesheet account (see useLmsLauncher). */
+function MyLmsLink({ onOpened, variant }: { onOpened: () => void; variant: 'nav' | 'footer' }) {
   const { open: launch, busy } = useLmsLauncher();
   const open = async () => {
     if (await launch()) onOpened();
@@ -93,7 +93,10 @@ function MyLmsLink({ onOpened }: { onOpened: () => void }) {
       type="button"
       onClick={open}
       disabled={busy}
-      className="group relative mt-2 flex w-full items-center gap-3 rounded-md border-t border-sidebar-border px-3 py-2 pt-3 text-left text-sm font-medium text-slate-300 transition-colors hover:bg-sidebar-hover hover:text-white disabled:opacity-60"
+      className={cn(
+        'group relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-sm font-medium text-slate-300 transition-colors hover:bg-sidebar-hover hover:text-white disabled:opacity-60',
+        variant === 'footer' ? 'mt-2 border-t border-sidebar-border pt-3' : undefined,
+      )}
       title="Open the learning portal in a new tab"
     >
       <GraduationCap className="h-[18px] w-[18px] shrink-0 text-sidebar-muted group-hover:text-slate-200" />

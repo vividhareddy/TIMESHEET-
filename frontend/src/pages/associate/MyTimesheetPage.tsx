@@ -12,6 +12,7 @@ import {
   computeOvertime,
   dailyTotals,
   deriveTimesheetStatus,
+  halfDayHours,
   isEntryLocked,
   weekExpectations,
 } from '@/utils/timesheet';
@@ -26,7 +27,10 @@ import { WeekNavigator } from '@/components/timesheet/WeekNavigator';
 import { ApprovalHistory } from '@/components/timesheet/ApprovalHistory';
 
 function sameEntries(a: TimesheetEntry[], b: TimesheetEntry[]) {
-  return JSON.stringify(a.map((e) => [e.projectId, e.hours, e.description])) === JSON.stringify(b.map((e) => [e.projectId, e.hours, e.description]));
+  return (
+    JSON.stringify(a.map((e) => [e.projectId, e.hours, e.entryTypes, e.description])) ===
+    JSON.stringify(b.map((e) => [e.projectId, e.hours, e.entryTypes, e.description]))
+  );
 }
 
 export function MyTimesheetPage() {
@@ -49,7 +53,7 @@ export function MyTimesheetPage() {
     const saved = timesheet?.entries ?? [];
     const missing = weekAllocs
       .filter((a) => !saved.some((e) => e.projectId === a.projectId))
-      .map<TimesheetEntry>((a) => ({ projectId: a.projectId, hours: Array(7).fill(0), description: '', status: 'draft' }));
+      .map<TimesheetEntry>((a) => ({ projectId: a.projectId, hours: Array(7).fill(0), entryTypes: Array(7).fill('regular'), description: '', status: 'draft' }));
     return [...saved, ...missing];
   }, [timesheet, weekAllocs]);
 
@@ -75,6 +79,7 @@ export function MyTimesheetPage() {
   const hasWeekendHours = entries.some((e) => (e.hours[5] ?? 0) + (e.hours[6] ?? 0) > 0);
   const showWeekend = showWeekendToggle || hasWeekendHours;
   const allocated = sum(weekAllocs.map((a) => a.weeklyHours));
+  const halfDay = halfDayHours(user, calendar);
   const flagged = entries.filter((e) => e.managerComment && (e.status === 'returned' || e.status === 'rejected'));
   const previous = timesheets.find((t) => t.employeeId === user.id && t.weekStart === addDays(weekStart, -7));
 
@@ -121,9 +126,16 @@ export function MyTimesheetPage() {
         if (isEntryLocked(r.status)) return r;
         const prev = previous.entries.find((p) => p.projectId === r.projectId);
         if (!prev) return r;
-        // Do not copy hours into holidays / non-working days.
-        const hours = prev.hours.map((h, i) => (days[i].working ? h : 0));
-        return { ...r, hours, description: r.description || prev.description };
+        const prevTypes = prev.entryTypes?.length === 7 ? prev.entryTypes : Array(7).fill('regular');
+        // Do not copy hours or entry types into holidays / non-working days.
+        const entryTypes = prevTypes.map((t, i) => (days[i].working ? t : 'regular'));
+        const hours = prev.hours.map((h, i) => {
+          if (!days[i].working) return 0;
+          if (entryTypes[i] === 'half_day') return halfDay; // recomputed for this week's schedule
+          if (entryTypes[i] === 'leave' || entryTypes[i] === 'holiday') return 0;
+          return h;
+        });
+        return { ...r, hours, entryTypes, description: r.description || prev.description };
       }),
     );
     toast.info('Copied previous week', 'Review the hours and descriptions before saving.');
@@ -220,6 +232,7 @@ export function MyTimesheetPage() {
             allowWeekendEntry={settings.allowWeekendEntry}
             dailyThreshold={policy.dailyThreshold}
             increment={settings.hourIncrement}
+            halfDayHours={halfDay}
             invalidDescriptions={invalid}
           />
         ) : (
