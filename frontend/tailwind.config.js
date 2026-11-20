@@ -1,3 +1,7 @@
+/** Colours come from CSS variables (src/index.css) so the whole palette switches between light and dark themes. */
+const v = (name) => `rgb(var(--c-${name}) / <alpha-value>)`;
+const scale = (name) => Object.fromEntries(['50', '100', '200', '300', '400', '500', '600', '700', '800', '900', '950'].map((s) => [s, v(`${name}-${s}`)]));
+
 /** @type {import('tailwindcss').Config} */
 export default {
   // relative: the Express server (started from backend/) runs Vite, so paths must not depend on the working directory.
@@ -8,20 +12,21 @@ export default {
         sans: ['Inter', 'ui-sans-serif', 'system-ui', 'Segoe UI', 'sans-serif'],
       },
       colors: {
+        slate: scale('slate'),
+        emerald: scale('emerald'),
+        amber: scale('amber'),
+        rose: scale('rose'),
+        violet: scale('violet'),
+        teal: scale('teal'),
+        orange: scale('orange'),
+        red: scale('red'),
+        brand: scale('brand'),
         sidebar: {
-          DEFAULT: '#1e293b',
-          hover: '#273449',
-          active: '#334155',
-          border: '#2c3a50',
-          muted: '#94a3b8',
-        },
-        brand: {
-          50: '#eef4fb',
-          100: '#d9e6f5',
-          200: '#b6cdea',
-          500: '#3b6db3',
-          600: '#2f5c9e',
-          700: '#274c83',
+          DEFAULT: v('sidebar-default'),
+          hover: v('sidebar-hover'),
+          active: v('sidebar-active'),
+          border: v('sidebar-border'),
+          muted: v('sidebar-muted'),
         },
       },
       boxShadow: {

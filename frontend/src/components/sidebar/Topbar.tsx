@@ -9,6 +9,7 @@ import { useNotifications } from '@/hooks/useNotifications';
 import { IS_MOCK_MODE, authService } from '@/services';
 import { homePath } from '@/routes/navigation';
 import { Avatar } from '@/components/common/Misc';
+import { ThemeToggle } from '@/components/common/ThemeToggle';
 import { cn } from '@/utils/format';
 
 function useClickOutside(onOutside: () => void) {
@@ -67,6 +68,7 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
       )}
 
       <div className="ml-auto flex items-center gap-1 sm:gap-2">
+        <ThemeToggle />
         <div className="relative" ref={notifRef}>
           <button onClick={() => setMenu(menu === 'notif' ? 'none' : 'notif')} className="relative rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-700" aria-label="Notifications">
             <Bell className="h-5 w-5" />

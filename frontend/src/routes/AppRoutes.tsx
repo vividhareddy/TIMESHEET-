@@ -9,6 +9,7 @@ import { homePath } from './navigation';
 import { LoginPage } from '@/pages/LoginPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 import { ErrorScreen, LoadingScreen } from '@/components/common/StatusScreen';
+import { EmbeddedAssistant } from '@/components/assistant/EmbeddedAssistant';
 
 import { AdminDashboard } from '@/pages/admin/AdminDashboard';
 import { EmployeesPage } from '@/pages/admin/EmployeesPage';
@@ -126,6 +127,8 @@ function HomeRedirect() {
 export function AppRoutes() {
   return (
     <Routes>
+      {/* Only the assistant, framed by the LMS. Outside SessionGate: it handles a missing session itself. */}
+      <Route path="/assistant/embed" element={<EmbeddedAssistant />} />
       <Route element={<SessionGate />}>
         <Route path="/" element={<HomeRedirect />} />
         <Route path="/login" element={<HomeRedirect />} />

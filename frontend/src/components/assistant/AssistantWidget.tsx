@@ -49,6 +49,7 @@ import { deriveTimesheetStatus, entryTotal, findHoliday, isWorkingDay, timesheet
 import { cn } from '@/utils/format';
 import { PROJECT_COLOR_PALETTE } from '@/constants/ui';
 import { takeSignInGreeting } from './greeting';
+import { homePath } from '@/routes/navigation';
 import { ConfettiRain, DrawnCheck, PartyBurst, Sparkles as SparkleBursts, type SparkleBurst } from './celebrations';
 import {
   asksForCategories,
@@ -214,7 +215,25 @@ function intentFor(text: string): NodeId {
   return 'fallback';
 }
 
-export function AssistantWidget({ role }: { role: Role }) {
+/** Messages the embedded assistant sends to the page that frames it (the LMS). */
+export const EMBED_CLOSE_MESSAGE = 'timetrack-assistant:close';
+
+/** The LMS page this assistant is framed in, if it is (same origin, under /lms). */
+function framingLms(): Window | null {
+  try {
+    if (window.top && window.top !== window && window.top.location.pathname.startsWith('/lms')) return window.top;
+  } catch {
+    // A page on another origin frames us: treat it as not the LMS.
+  }
+  return null;
+}
+
+/**
+ * `embedded`: the assistant runs inside the LMS (in a frame, see components/assistant/EmbeddedAssistant.tsx). It is
+ * always open, has no launcher or full-screen welcome, sends timesheet links to the whole window, and switches LMS
+ * pages in place instead of opening a new tab.
+ */
+export function AssistantWidget({ role, embedded = false }: { role: Role; embedded?: boolean }) {
   const navigate = useNavigate();
   const user = useCurrentUser();
   const { timesheets, leaves, calendars, applyLeave, allocations, projects } = useAppData();
@@ -222,7 +241,7 @@ export function AssistantWidget({ role }: { role: Role }) {
   const { counts, items } = useNotifications();
   const lms = useLmsLauncher();
 
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(embedded);
   /** Full-screen welcome shown right after sign-in; otherwise the assistant is a small panel in the corner. */
   const [focus, setFocus] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -252,13 +271,19 @@ export function AssistantWidget({ role }: { role: Role }) {
   const build = (node: NodeId): Reply => {
     const mainOptions: Option[] = [
       { id: 'go-ts', label: 'Timesheet', icon: Clock, accent: 'brand', hint: role === 'associate' ? 'Log hours, leave and overtime' : 'Approvals, allocations and reports', action: { kind: 'node', node: 'timesheet' } },
-      ...(IS_MOCK_MODE ? [] : [{ id: 'go-lms', label: 'LMS', icon: GraduationCap, accent: 'violet', hint: 'Courses, training and certificates', action: { kind: 'node', node: 'lms' } } satisfies Option]),
+      ...(IS_MOCK_MODE && !(embedded && framingLms()) ? [] : [{ id: 'go-lms', label: 'LMS', icon: GraduationCap, accent: 'violet', hint: 'Courses, training and certificates', action: { kind: 'node', node: 'lms' } } satisfies Option]),
       { id: 'go-plan', label: 'Plan a leave', icon: CalendarSearch, accent: 'teal', hint: 'Clash-free dates, sent for you', action: { kind: 'node', node: 'plan' } },
       { id: 'go-att', label: 'What needs my attention?', icon: Bell, accent: 'amber', hint: attentionCount ? 'Pending items and reminders' : "You're all caught up", count: attentionCount || undefined, action: { kind: 'node', node: 'attention' } },
+      ...(embedded ? [{ id: 'go-home', label: 'Back to my timesheet', icon: ArrowLeft, accent: 'brand', hint: 'Leave the LMS for your workspace', action: { kind: 'nav', to: homePath(role) } } satisfies Option] : []),
     ];
 
     switch (node) {
       case 'welcome':
+        if (embedded)
+          return {
+            text: `${greetingForHour(new Date().getHours())}, ${firstName}! You're in the LMS. I can find courses, plan your leave or take you back to your timesheet.`,
+            options: mainOptions,
+          };
         return {
           text: `${greetingForHour(new Date().getHours())}, ${firstName}! Where do you want to go today?`,
           options: mainOptions,
@@ -362,9 +387,9 @@ export function AssistantWidget({ role }: { role: Role }) {
 
   function lmsStep(): Reply {
     const explore: Option = { id: 'lms-explore', label: 'Explore courses', icon: LayoutGrid, action: { kind: 'courses' } };
-    if (IS_MOCK_MODE) return { text: "The LMS itself isn't available in mock mode, but you can explore the sample course catalogue.", options: [explore, BACK] };
+    if (IS_MOCK_MODE && !(embedded && framingLms())) return { text: "The LMS itself isn't available in mock mode, but you can explore the sample course catalogue.", options: [explore, BACK] };
     return {
-      text: "The LMS opens in a new tab and you're signed in automatically. Where would you like to start?",
+      text: embedded ? 'Where would you like to go in the LMS?' : "The LMS opens in a new tab and you're signed in automatically. Where would you like to start?",
       options: [
         explore,
         { id: 'lms-courses', label: 'Continue my learning', icon: BookOpen, action: { kind: 'lms', page: 'courses' } },
@@ -468,7 +493,9 @@ export function AssistantWidget({ role }: { role: Role }) {
     return catalog.current;
   };
 
-  const lmsAction = (page: LmsPage): Action => (IS_MOCK_MODE ? { kind: 'node', node: 'lms' } : { kind: 'lms', page });
+  // Inside an LMS page the LMS is always there, even when the timesheet runs on the development mock API.
+  const lmsAvailable = !IS_MOCK_MODE || (embedded && framingLms() !== null);
+  const lmsAction = (page: LmsPage): Action => (lmsAvailable ? { kind: 'lms', page } : { kind: 'node', node: 'lms' });
   const courseOption = (c: CatalogCourse): Option => ({ id: `course-${c.id}`, label: c.title, course: c, action: lmsAction('catalog') });
   const seeAllCourses = (total: number): Option => ({ id: 'see-all-courses', label: `See all ${total} courses`, icon: LibraryBig, action: lmsAction('catalog') });
 
@@ -943,7 +970,7 @@ export function AssistantWidget({ role }: { role: Role }) {
 
   // Pop up once, right after sign-in.
   useEffect(() => {
-    if (takeSignInGreeting()) {
+    if (!embedded && takeSignInGreeting()) {
       setOpen(true);
       setFocus(true);
       setCelebration({ id: Date.now(), kind: 'welcome' });
@@ -988,6 +1015,11 @@ export function AssistantWidget({ role }: { role: Role }) {
   }, [open]);
 
   const close = () => {
+    if (embedded) {
+      // The LMS page hides the frame.
+      window.parent.postMessage({ type: EMBED_CLOSE_MESSAGE }, window.location.origin);
+      return;
+    }
     if (focus) setPeek(true);
     setOpen(false);
     setFocus(false);
@@ -1008,6 +1040,14 @@ export function AssistantWidget({ role }: { role: Role }) {
   const choose = (option: Option) => {
     if (typing) return;
     const { action } = option;
+    const lmsWindow = embedded ? framingLms() : null;
+    if (action.kind === 'lms' && lmsWindow) {
+      // Already in the LMS: switch its page in place.
+      push('user', option.label);
+      lmsWindow.location.hash = action.page ?? 'dashboard';
+      later(() => push('bot', `Done, the LMS is showing ${option.label === 'Go to My LMS' ? 'your home page' : `"${option.label}"`}. Anything else?`, buildRef.current('menu').options));
+      return;
+    }
     if (action.kind === 'lms') {
       // Opened straight from the click, so the browser does not block the new tab.
       void lms.open(action.page).then((ok) => {
@@ -1033,6 +1073,15 @@ export function AssistantWidget({ role }: { role: Role }) {
     }
     later(() => {
       push('bot', `Taking you to ${option.label.replace(/^Go to /, '')}…`);
+      if (embedded) {
+        // Timesheet pages open in the whole window, leaving the LMS.
+        try {
+          (window.top ?? window).location.assign(action.to);
+        } catch {
+          window.open(action.to, '_blank', 'noopener');
+        }
+        return;
+      }
       navigate(action.to);
       // Step out of the way of the page, leaving the menu ready for next time.
       const id = window.setTimeout(() => {
@@ -1221,7 +1270,9 @@ export function AssistantWidget({ role }: { role: Role }) {
         'chat-pop flex flex-col overflow-hidden bg-white ring-1 ring-slate-200',
         focus
           ? 'relative h-full w-full sm:h-[min(700px,calc(100vh-4rem))] sm:w-[min(800px,calc(100vw-4rem))] sm:rounded-2xl sm:shadow-2xl'
-          : 'fixed bottom-24 right-4 z-40 h-[min(580px,calc(100vh-8rem))] w-[390px] max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl sm:right-6',
+          : embedded
+            ? 'h-full w-full'
+            : 'fixed bottom-24 right-4 z-40 h-[min(580px,calc(100vh-8rem))] w-[390px] max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl sm:right-6',
       )}
     >
       {celebration?.kind === 'welcome' && (
@@ -1231,7 +1282,7 @@ export function AssistantWidget({ role }: { role: Role }) {
       )}
       {celebration?.kind === 'success' && <ConfettiRain seed={celebration.id} />}
       <SparkleBursts bursts={sparkles} />
-      <header className="relative flex items-center gap-3 overflow-hidden bg-gradient-to-r from-sidebar via-sidebar to-brand-700 px-4 py-3 text-white">
+      <header className="palette-light relative flex items-center gap-3 overflow-hidden bg-gradient-to-r from-sidebar via-sidebar to-brand-700 px-4 py-3 text-white">
         <span className="pointer-events-none absolute -right-10 -top-16 h-40 w-40 rounded-full bg-brand-500/20 blur-2xl" aria-hidden />
         <span className="avatar-bob relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/20">
           <Bot className="h-5 w-5" />
@@ -1369,6 +1420,8 @@ export function AssistantWidget({ role }: { role: Role }) {
       </form>
     </section>
   );
+
+  if (embedded) return panel;
 
   return (
     <>

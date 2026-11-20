@@ -25,7 +25,7 @@ export function Sidebar({ role, open, onClose }: SidebarProps) {
       {open && <div className="fixed inset-0 z-30 bg-slate-900/40 lg:hidden" onClick={onClose} aria-hidden />}
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-40 flex w-60 flex-col bg-sidebar text-slate-300 transition-transform lg:translate-x-0',
+          'palette-light fixed inset-y-0 left-0 z-40 flex w-60 flex-col bg-sidebar text-slate-300 transition-transform lg:translate-x-0',
           open ? 'translate-x-0' : '-translate-x-full',
         )}
       >

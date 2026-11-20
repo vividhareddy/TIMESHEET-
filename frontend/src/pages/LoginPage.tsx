@@ -7,6 +7,7 @@ import { useApiQuery } from '@/hooks/useApiQuery';
 import { API_BASE_URL, ApiError, IS_MOCK_MODE, authService, mockControlService } from '@/services';
 import { Button } from '@/components/common/Button';
 import { cn } from '@/utils/format';
+import { ThemeToggle } from '@/components/common/ThemeToggle';
 import { Field, Input } from '@/components/forms/FormControls';
 import { Alert, Avatar } from '@/components/common/Misc';
 import { ErrorState, Spinner } from '@/components/common/StatusScreen';
@@ -34,7 +35,10 @@ export function LoginPage() {
 
       <main className="no-scrollbar flex min-w-0 flex-col items-center bg-white px-6 py-10 sm:px-10 lg:overflow-y-auto lg:py-[clamp(12px,3vh,48px)]">
         <div className="my-auto w-full max-w-[450px]">
-          <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-brand-600">Welcome to TimeTrack Pro{IS_MOCK_MODE && <MockBadge />}</p>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-brand-600">Welcome to TimeTrack Pro{IS_MOCK_MODE && <MockBadge />}</p>
+            <ThemeToggle className="-mr-2 shrink-0" />
+          </div>
           <h1 className="mt-[clamp(6px,1.5vh,16px)] text-[34px] font-extrabold leading-tight tracking-tight text-slate-900 sm:text-[38px] lg:text-[clamp(26px,4.6vh,38px)]">
             Good to have you here.
           </h1>
@@ -83,7 +87,7 @@ function BrandPanel() {
       <div className="relative mt-8 lg:mt-0">
         <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-brand-200">Plan today. Deliver tomorrow.</p>
         <h2 className="mt-4 max-w-[520px] text-3xl font-bold leading-[1.12] tracking-tight sm:text-4xl lg:text-[clamp(34px,5vh,48px)]">Make every hour count.</h2>
-        <p className="mt-4 max-w-[420px] text-[15px] leading-relaxed text-slate-300">
+        <p className="palette-light mt-4 max-w-[420px] text-[15px] leading-relaxed text-slate-300">
           Log your project hours, track every approval and see exactly where your week went.
         </p>
         <TimesheetIllustration />

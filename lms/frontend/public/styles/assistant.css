@@ -1,0 +1,100 @@
+/* TimeTrack Assistant in the LMS (scripts/assistant.js): the same blue launcher and panel as in the timesheet app. */
+.tt-assistant-button {
+  position: fixed;
+  right: 24px;
+  bottom: 20px;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  height: 56px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #3b6db3, #274c83);
+  color: #fff;
+  font: 600 14px/1 Inter, 'DM Sans', system-ui, sans-serif;
+  box-shadow: 0 10px 30px -10px rgba(15, 23, 42, 0.45);
+  cursor: pointer;
+  transition: box-shadow 0.2s, transform 0.2s;
+  animation: tt-assistant-in 0.4s cubic-bezier(0.25, 1.4, 0.5, 1) both;
+}
+.tt-assistant-button:hover {
+  box-shadow: 0 16px 36px -10px rgba(15, 23, 42, 0.55);
+}
+.tt-assistant-button:focus-visible {
+  outline: 4px solid #b6cdea;
+  outline-offset: 2px;
+}
+.tt-assistant-icon {
+  display: inline-flex;
+}
+.tt-assistant-label {
+  max-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: max-width 0.3s, margin 0.3s;
+}
+.tt-assistant-button:not(.is-open):hover .tt-assistant-label,
+.tt-assistant-button:not(.is-open):focus-visible .tt-assistant-label {
+  max-width: 120px;
+  margin-left: 8px;
+}
+.tt-assistant-panel {
+  position: fixed;
+  right: 24px;
+  bottom: 92px;
+  z-index: 9000;
+  width: 400px;
+  max-width: calc(100vw - 32px);
+  height: min(600px, calc(100vh - 120px));
+  overflow: hidden;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.45), 0 0 0 1px rgba(15, 23, 42, 0.08);
+  transform-origin: bottom right;
+  animation: tt-assistant-pop 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+.tt-assistant-panel[hidden] {
+  display: none;
+}
+.tt-assistant-panel iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+@keyframes tt-assistant-pop {
+  from { opacity: 0; transform: translateY(12px) scale(0.92); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes tt-assistant-in {
+  from { opacity: 0; transform: scale(0.6); }
+  to { opacity: 1; transform: none; }
+}
+@media (max-width: 560px) {
+  .tt-assistant-panel {
+    right: 0;
+    bottom: 0;
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    border-radius: 0;
+  }
+  .tt-assistant-button.is-open {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tt-assistant-button,
+  .tt-assistant-panel {
+    animation: none;
+  }
+}
+@media print {
+  .tt-assistant-button,
+  .tt-assistant-panel {
+    display: none !important;
+  }
+}
