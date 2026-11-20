@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
+  ArrowRight,
   Award,
   BarChart3,
   Bell,
@@ -23,6 +24,7 @@ import {
   Plane,
   RotateCcw,
   SendHorizontal,
+  Sparkles,
   Timer,
   X,
   type LucideIcon,
@@ -34,10 +36,11 @@ import { useAppData } from '@/context/AppDataContext';
 import { useCurrentUser, useLookups } from '@/hooks/useLookups';
 import { useNotifications } from '@/hooks/useNotifications';
 import { useLmsLauncher, type LmsPage } from '@/hooks/useLmsLauncher';
-import { currentWeekStart, formatWeekRange, todayISO } from '@/utils/date';
-import { deriveTimesheetStatus, findHoliday, isWorkingDay, timesheetTotal } from '@/utils/timesheet';
+import { currentWeekStart, formatDate, formatWeekRange, todayISO } from '@/utils/date';
+import { deriveTimesheetStatus, entryTotal, findHoliday, isWorkingDay, timesheetTotal } from '@/utils/timesheet';
 import { cn } from '@/utils/format';
 import { takeSignInGreeting } from './greeting';
+import { ConfettiRain, DrawnCheck, PartyBurst, Sparkles as SparkleBursts, type SparkleBurst } from './celebrations';
 import { addMonths, dayLabel, monthLabel, monthOf, parseDates, parseMonth, suggestLeaveDays, type ISODate } from './leavePlanner';
 
 /**
@@ -82,22 +85,61 @@ interface Option {
   count?: number;
   /** One-line description, shown on the large cards of the full-screen welcome. */
   hint?: string;
+  /** Colour of the icon tile on the large welcome cards. */
+  accent?: Accent;
+  /** A suggested leave day: shown as a small calendar tile instead of a button pill. */
+  date?: ISODate;
+  /** Short note on a calendar tile, e.g. "Long weekend". */
+  tag?: string;
   action: Action;
 }
+
+type Accent = 'brand' | 'violet' | 'teal' | 'amber';
+const ACCENTS: Record<Accent, string> = {
+  brand: 'bg-brand-50 text-brand-600 group-hover:bg-brand-600 group-hover:text-white',
+  violet: 'bg-violet-50 text-violet-600 group-hover:bg-violet-600 group-hover:text-white',
+  teal: 'bg-teal-50 text-teal-600 group-hover:bg-teal-600 group-hover:text-white',
+  amber: 'bg-amber-50 text-amber-600 group-hover:bg-amber-500 group-hover:text-white',
+};
+
+/** Rich content shown inside a bot message. */
+type Card =
+  | { kind: 'week'; title: string; hours: number; target: number; status: string; projects: { name: string; color: string; hours: number }[] }
+  | { kind: 'summary'; title: string; rows: { label: string; value: string }[]; footer?: string };
 
 interface Message {
   id: number;
   from: 'bot' | 'user';
   text: string;
   options?: Option[];
+  card?: Card;
+  /** 'success' tints the bubble green and plays a small celebration. */
+  tone?: 'success';
+  at: number;
 }
 
 interface Reply {
   text: string;
   options: Option[];
+  card?: Card;
+  tone?: 'success';
 }
 
+type Extra = Pick<Message, 'card' | 'tone'>;
+
 const TYPING_MS = 450;
+
+const STATUS_SHORT: Record<TimesheetStatus, string> = {
+  not_started: 'Not started',
+  draft: 'Draft',
+  submitted: 'Submitted',
+  partially_approved: 'Partly approved',
+  approved: 'Approved',
+  returned: 'Returned',
+  rejected: 'Rejected',
+};
+
+const timeLabel = (at: number) => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
 const STATUS_TEXT: Record<TimesheetStatus, string> = {
   not_started: 'not started yet',
@@ -137,7 +179,7 @@ export function AssistantWidget({ role }: { role: Role }) {
   const navigate = useNavigate();
   const user = useCurrentUser();
   const { timesheets, leaves, calendars, applyLeave } = useAppData();
-  const { employeeName } = useLookups();
+  const { employeeName, project } = useLookups();
   const { counts, items } = useNotifications();
   const lms = useLmsLauncher();
 
@@ -153,6 +195,12 @@ export function AssistantWidget({ role }: { role: Role }) {
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const launcher = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  /** The current one-off celebration (party poppers on welcome, confetti rain on success). */
+  const [celebration, setCelebration] = useState<{ id: number; kind: 'welcome' | 'success' } | null>(null);
+  const [sparkles, setSparkles] = useState<SparkleBurst[]>([]);
+  /** "I'm right here" bubble next to the chat button, shown briefly after the welcome is closed. */
+  const [peek, setPeek] = useState(false);
   const plan = useRef<PlanState>({ stage: 'idle' });
   const availabilityCache = useRef(new Map<string, TeamAvailability>());
   /** Bumped by "start over", so a reply still loading from the server is dropped. */
@@ -164,16 +212,16 @@ export function AssistantWidget({ role }: { role: Role }) {
   /** Builds a step of the conversation from the latest data. */
   const build = (node: NodeId): Reply => {
     const mainOptions: Option[] = [
-      { id: 'go-ts', label: 'Timesheet', icon: Clock, hint: role === 'associate' ? 'Log hours, leave and overtime' : 'Approvals, allocations and reports', action: { kind: 'node', node: 'timesheet' } },
-      ...(IS_MOCK_MODE ? [] : [{ id: 'go-lms', label: 'LMS', icon: GraduationCap, hint: 'Courses, training and certificates', action: { kind: 'node', node: 'lms' } } satisfies Option]),
-      { id: 'go-plan', label: 'Plan a leave', icon: CalendarSearch, hint: 'Clash-free dates, sent for you', action: { kind: 'node', node: 'plan' } },
-      { id: 'go-att', label: 'What needs my attention?', icon: Bell, hint: attentionCount ? 'Pending items and reminders' : "You're all caught up", count: attentionCount || undefined, action: { kind: 'node', node: 'attention' } },
+      { id: 'go-ts', label: 'Timesheet', icon: Clock, accent: 'brand', hint: role === 'associate' ? 'Log hours, leave and overtime' : 'Approvals, allocations and reports', action: { kind: 'node', node: 'timesheet' } },
+      ...(IS_MOCK_MODE ? [] : [{ id: 'go-lms', label: 'LMS', icon: GraduationCap, accent: 'violet', hint: 'Courses, training and certificates', action: { kind: 'node', node: 'lms' } } satisfies Option]),
+      { id: 'go-plan', label: 'Plan a leave', icon: CalendarSearch, accent: 'teal', hint: 'Clash-free dates, sent for you', action: { kind: 'node', node: 'plan' } },
+      { id: 'go-att', label: 'What needs my attention?', icon: Bell, accent: 'amber', hint: attentionCount ? 'Pending items and reminders' : "You're all caught up", count: attentionCount || undefined, action: { kind: 'node', node: 'attention' } },
     ];
 
     switch (node) {
       case 'welcome':
         return {
-          text: `${greetingForHour(new Date().getHours())}, ${firstName}! 👋\nWhere do you want to go today?`,
+          text: `${greetingForHour(new Date().getHours())}, ${firstName}! Where do you want to go today?`,
           options: mainOptions,
         };
       case 'menu':
@@ -222,8 +270,17 @@ export function AssistantWidget({ role }: { role: Role }) {
           ? `You haven't logged any hours for the week of ${formatWeekRange(week)} yet.`
           : `Week of ${formatWeekRange(week)}: ${formatHoursShort(hours)} across ${projects} project${projects === 1 ? '' : 's'}, ${STATUS_TEXT[status]}.`;
       const returned = items.find((i) => i.id.startsWith('n-ret-'));
+      const card: Card = {
+        kind: 'week',
+        title: `Week of ${formatWeekRange(week)}`,
+        hours,
+        target: user.weeklyCapacity || 40,
+        status: STATUS_SHORT[status],
+        projects: (current?.entries ?? []).map((e) => ({ name: project(e.projectId)?.name ?? 'Project', color: project(e.projectId)?.color ?? '#94a3b8', hours: entryTotal(e) })),
+      };
       return {
-        text: `${summary}\nWhat would you like to do?`,
+        card,
+        text: `${status === 'not_started' ? summary : "Here's your week so far."}\nWhat would you like to do?`,
         options: [
           returned
             ? { id: 'ts-fix', label: 'Fix returned hours', icon: RotateCcw, count: counts.returned, action: { kind: 'nav', to: returned.to } }
@@ -310,8 +367,8 @@ export function AssistantWidget({ role }: { role: Role }) {
   const buildRef = useRef(build);
   buildRef.current = build;
 
-  const push = useCallback((from: Message['from'], text: string, options?: Option[]) => {
-    setMessages((list) => [...list, { id: nextId.current++, from, text, options }]);
+  const push = useCallback((from: Message['from'], text: string, options?: Option[], extra?: Extra) => {
+    setMessages((list) => [...list, { id: nextId.current++, from, text, options, at: Date.now(), ...extra }]);
   }, []);
 
   const later = useCallback((fn: () => void, ms = TYPING_MS) => {
@@ -327,7 +384,7 @@ export function AssistantWidget({ role }: { role: Role }) {
     (node: NodeId) =>
       later(() => {
         const reply = buildRef.current(node);
-        push('bot', reply.text, reply.options);
+        push('bot', reply.text, reply.options, { card: reply.card, tone: reply.tone });
       }),
     [later, push],
   );
@@ -347,7 +404,8 @@ export function AssistantWidget({ role }: { role: Role }) {
           const id = window.setTimeout(() => {
             if (epoch.current !== mine) return;
             setTyping(false);
-            push('bot', reply.text, reply.options);
+            push('bot', reply.text, reply.options, { card: reply.card, tone: reply.tone });
+            if (reply.tone === 'success') setCelebration({ id: Date.now(), kind: 'success' });
           }, Math.max(0, TYPING_MS - (Date.now() - started)));
           timers.current.push(id);
         });
@@ -418,7 +476,7 @@ export function AssistantWidget({ role }: { role: Role }) {
         lines.push(`\nThere are no clash-free working days left in ${name}. You can still pick your own dates, or look at another month.`);
         return { text: lines.join('\n'), options: monthChoices(month) };
       }
-      lines.push(`\nThese days are free for the whole team${suggestions.some((x) => x.longWeekend) ? ' (🌴 = long weekend)' : ''}. Tap one to request it, or pick your own:`);
+      lines.push(`\nThese days are free for the whole team. Tap one to request it, or pick your own:`);
       return {
         text: lines.join('\n'),
         options: [
@@ -426,6 +484,8 @@ export function AssistantWidget({ role }: { role: Role }) {
             (x): Option => ({
               id: `sg-${x.date}`,
               label: `${dayLabel(x.date, today)}${x.longWeekend ? ' 🌴' : ''}${x.note && x.note !== 'long weekend' ? ` · ${x.note}` : ''}`,
+              date: x.date,
+              tag: x.note ? (x.note === 'long weekend' ? '🌴 Long weekend' : `🌴 ${x.note[0]!.toUpperCase()}${x.note.slice(1)}`) : undefined,
               icon: CalendarCheck,
               action: { kind: 'leave', step: { to: 'pick', dates: [x.date] } },
             }),
@@ -499,13 +559,16 @@ export function AssistantWidget({ role }: { role: Role }) {
     });
   };
 
-  const confirmText = (state: PlanState) =>
-    [
-      'Here is your leave request:',
-      ...(state.dates ?? []).map((d) => `• ${dayLabel(d, today)}, ${durationLabel(state.duration ?? 'full').toLowerCase()}`),
-      `Reason: ${state.reason}`,
-      approver ? `It will go to ${approver} for approval. Send it?` : 'It will go for approval. Send it?',
-    ].join('\n');
+  const summaryCard = (state: PlanState): Card => ({
+    kind: 'summary',
+    title: 'Leave request',
+    rows: [
+      { label: (state.dates?.length ?? 0) > 1 ? 'Dates' : 'Date', value: (state.dates ?? []).map((d) => dayLabel(d, today)).join(', ') },
+      { label: 'Duration', value: `${durationLabel(state.duration ?? 'full')}${(state.dates?.length ?? 0) > 1 ? ' each' : ''}` },
+      { label: 'Reason', value: state.reason ?? '' },
+      ...(approver ? [{ label: 'Approver', value: approver }] : []),
+    ],
+  });
 
   const sendLeave = () => {
     const { dates = [], duration = 'full', reason = '' } = plan.current;
@@ -530,6 +593,7 @@ export function AssistantWidget({ role }: { role: Role }) {
       lines.push(...failed);
       if (sent.length) lines.push("You'll see the status on your Leave Requests page.");
       return {
+        tone: sent.length && !failed.length ? 'success' : undefined,
         text: lines.join('\n'),
         options: [
           ...(role === 'associate' ? [{ id: 'lv-view', label: 'View my leave requests', icon: Plane, action: { kind: 'nav', to: '/associate/leave' } } satisfies Option] : []),
@@ -569,11 +633,11 @@ export function AssistantWidget({ role }: { role: Role }) {
       case 'reason':
         plan.current = { ...plan.current, stage: 'confirm', reason: step.reason };
         return later(() =>
-          push('bot', confirmText(plan.current), [
+          push('bot', approver ? `Here's your request. It goes to ${approver} for approval. Shall I send it?` : "Here's your request. Shall I send it?", [
             { id: 'pl-send', label: 'Send request', icon: SendHorizontal, action: { kind: 'leave', step: { to: 'send' } } },
             { id: 'pl-custom', label: 'Change dates', icon: PencilLine, action: { kind: 'leave', step: { to: 'custom' } } },
             { id: 'pl-cancel', label: 'Cancel', icon: X, action: { kind: 'leave', step: { to: 'cancel' } } },
-          ]),
+          ], { card: summaryCard(plan.current) }),
         );
       case 'send':
         return sendLeave();
@@ -642,8 +706,22 @@ export function AssistantWidget({ role }: { role: Role }) {
     if (takeSignInGreeting()) {
       setOpen(true);
       setFocus(true);
+      setCelebration({ id: Date.now(), kind: 'welcome' });
     }
   }, []);
+
+  // Celebrations play once, then their elements are removed.
+  useEffect(() => {
+    if (!celebration) return;
+    const id = window.setTimeout(() => setCelebration(null), celebration.kind === 'welcome' ? 3000 : 3600);
+    return () => window.clearTimeout(id);
+  }, [celebration]);
+
+  useEffect(() => {
+    if (!peek) return;
+    const id = window.setTimeout(() => setPeek(false), 4700);
+    return () => window.clearTimeout(id);
+  }, [peek]);
 
   // The page behind the full-screen welcome does not scroll.
   useEffect(() => {
@@ -670,9 +748,21 @@ export function AssistantWidget({ role }: { role: Role }) {
   }, [open]);
 
   const close = () => {
+    if (focus) setPeek(true);
     setOpen(false);
     setFocus(false);
+    setCelebration(null);
     launcher.current?.focus();
+  };
+
+  /** Little stars burst from where an option was clicked (not for keyboard presses). */
+  const sparkle = (event: MouseEvent<HTMLElement>) => {
+    const box = panelRef.current?.getBoundingClientRect();
+    if (!box || event.detail === 0) return;
+    const burst = { id: Date.now() + Math.random(), x: event.clientX - box.left, y: event.clientY - box.top };
+    setSparkles((list) => [...list, burst]);
+    const id = window.setTimeout(() => setSparkles((list) => list.filter((b) => b !== burst)), 700);
+    timers.current.push(id);
   };
 
   const choose = (option: Option) => {
@@ -744,64 +834,115 @@ export function AssistantWidget({ role }: { role: Role }) {
 
   const lastBot = [...messages].reverse().find((m) => m.from === 'bot');
 
+  // Rotating examples in the message box, so people discover what they can type.
+  const [hintIndex, setHintIndex] = useState(0);
+  useEffect(() => {
+    if (!open || draft) return;
+    const id = window.setInterval(() => setHintIndex((i) => (i + 1) % TYPING_HINTS.length), 3500);
+    return () => window.clearInterval(id);
+  }, [open, draft]);
+
+  const weekHours =
+    role === 'associate' ? timesheetTotal(timesheets.find((t) => t.employeeId === user.id && t.weekStart === currentWeekStart())) : null;
+
   const renderOptions = (m: Message) => {
     if (m !== lastBot || !m.options?.length || typing) return null;
 
     // Full-screen welcome: the main choices are large cards.
     if (focus && m.options.some((o) => o.hint)) {
       return (
-        <div className={cn('mt-4 grid gap-3', m.options.length === 4 ? 'sm:grid-cols-2' : 'sm:grid-cols-3')}>
-          {m.options.map((o) => (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          {m.options.map((o, i) => (
             <button
               key={o.id}
               type="button"
-              onClick={() => choose(o)}
+              onClick={(e) => {
+                sparkle(e);
+                choose(o);
+              }}
               disabled={o.action.kind === 'lms' && lms.busy}
-              className="group relative flex flex-col items-start gap-3 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-card transition-all hover:-translate-y-0.5 hover:border-brand-500 hover:shadow-pop focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-100 disabled:opacity-60"
+              style={{ animationDelay: `${i * 60}ms` }}
+              className="chip-in group relative flex items-center gap-3.5 overflow-hidden rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-pop focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-100 disabled:opacity-60"
             >
-              <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-brand-50 text-brand-600 transition-colors group-hover:bg-brand-600 group-hover:text-white">
-                {o.icon && <o.icon className="h-5 w-5" />}
+              <span className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl" aria-hidden>
+                <span className="card-shine absolute inset-y-0 left-0 w-1/3 bg-gradient-to-r from-transparent via-white/80 to-transparent" style={{ ['--delay' as string]: `${400 + i * 120}ms` }} />
               </span>
-              <span>
-                <span className="block text-sm font-semibold text-slate-800">{o.label}</span>
+              <span className={cn('flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-colors', ACCENTS[o.accent ?? 'brand'])}>
+                {o.icon && <o.icon className="icon-wiggle h-5 w-5" />}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+                  {o.label}
+                  {o.count ? <span className="rounded-full bg-red-500 px-1.5 py-px text-[10px] font-semibold tabular-nums text-white">{o.count}</span> : null}
+                </span>
                 {o.hint && <span className="mt-0.5 block text-xs text-slate-500">{o.hint}</span>}
               </span>
-              {o.count ? (
-                <span className="absolute right-3 top-3 rounded-full bg-red-500 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-white">{o.count}</span>
-              ) : null}
+              <ArrowRight className="h-4 w-4 shrink-0 -translate-x-1 text-slate-300 opacity-0 transition-all group-hover:translate-x-0 group-hover:text-brand-600 group-hover:opacity-100" />
             </button>
           ))}
         </div>
       );
     }
 
+    const dates = m.options.filter((o) => o.date);
+    const rest = m.options.filter((o) => !o.date);
     return (
-      <div className="mt-2 flex flex-wrap gap-2">
-        {m.options.map((o) => (
-          <button
-            key={o.id}
-            type="button"
-            onClick={() => choose(o)}
-            disabled={o.action.kind === 'lms' && lms.busy}
-            className={cn(
-              'inline-flex max-w-full items-center gap-1.5 rounded-full border text-left font-medium transition-colors disabled:opacity-60',
-              focus ? 'px-4 py-2 text-sm' : 'px-3 py-1.5 text-xs',
-              o.id === 'back'
-                ? 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
-                : 'border-brand-200 bg-white text-brand-700 hover:border-brand-500 hover:bg-brand-50',
-            )}
-          >
-            {o.icon && <o.icon className={cn('shrink-0', focus ? 'h-4 w-4' : 'h-3.5 w-3.5')} />}
-            <span className="truncate">{o.label}</span>
-            {o.count ? <span className="rounded-full bg-brand-600 px-1.5 text-[10px] font-semibold tabular-nums text-white">{o.count}</span> : null}
-          </button>
-        ))}
-      </div>
+      <>
+        {dates.length > 0 && (
+          <div className={cn('mt-2.5 grid gap-2', focus ? 'grid-cols-3 sm:grid-cols-6' : 'grid-cols-3')}>
+            {dates.map((o, i) => (
+              <DateTile
+                key={o.id}
+                option={o}
+                delay={i * 70}
+                onPick={(e) => {
+                  sparkle(e);
+                  choose(o);
+                }}
+              />
+            ))}
+          </div>
+        )}
+        <div className="mt-2.5 flex flex-wrap gap-2">
+          {rest.map((o, i) => (
+            <button
+              key={o.id}
+              type="button"
+              onClick={(e) => {
+                sparkle(e);
+                choose(o);
+              }}
+              disabled={o.action.kind === 'lms' && lms.busy}
+              style={{ animationDelay: `${(dates.length + i) * 45}ms` }}
+              className={cn(
+                'chip-in inline-flex max-w-full items-center gap-1.5 rounded-full border text-left font-medium shadow-sm transition-all hover:-translate-y-px disabled:opacity-60',
+                focus ? 'px-4 py-2 text-sm' : 'px-3 py-1.5 text-xs',
+                o.id === 'back'
+                  ? 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+                  : o.id === 'pl-send'
+                    ? 'border-transparent bg-gradient-to-r from-brand-500 to-brand-700 text-white hover:shadow-pop'
+                    : 'border-brand-200 bg-white text-brand-700 hover:border-brand-400 hover:bg-brand-50',
+              )}
+            >
+              {o.icon && <o.icon className={cn('shrink-0', focus ? 'h-4 w-4' : 'h-3.5 w-3.5')} />}
+              <span className="truncate">{o.label}</span>
+              {o.count ? <span className="rounded-full bg-brand-600 px-1.5 text-[10px] font-semibold tabular-nums text-white">{o.count}</span> : null}
+            </button>
+          ))}
+        </div>
+      </>
     );
   };
 
+  const botAvatar = (
+    <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-sm ring-2 ring-white">
+      <Bot className="h-4 w-4" />
+    </span>
+  );
+
   const panel = (
     <section
+      ref={panelRef}
       role="dialog"
       aria-modal={focus || undefined}
       aria-label="TimeTrack assistant"
@@ -810,99 +951,151 @@ export function AssistantWidget({ role }: { role: Role }) {
       className={cn(
         'chat-pop flex flex-col overflow-hidden bg-white ring-1 ring-slate-200',
         focus
-          ? 'h-full w-full sm:h-[min(680px,calc(100vh-4rem))] sm:w-[min(760px,calc(100vw-4rem))] sm:rounded-2xl sm:shadow-2xl'
-          : 'fixed bottom-24 right-4 z-40 h-[min(560px,calc(100vh-8rem))] w-[380px] max-w-[calc(100vw-2rem)] rounded-2xl shadow-pop sm:right-6',
+          ? 'relative h-full w-full sm:h-[min(700px,calc(100vh-4rem))] sm:w-[min(800px,calc(100vw-4rem))] sm:rounded-2xl sm:shadow-2xl'
+          : 'fixed bottom-24 right-4 z-40 h-[min(580px,calc(100vh-8rem))] w-[390px] max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl sm:right-6',
       )}
     >
-      <header className="flex items-center gap-3 bg-sidebar px-4 py-3 text-white">
-        <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-600">
+      {celebration?.kind === 'welcome' && (
+        <>
+          <PartyBurst seed={celebration.id} />
+        </>
+      )}
+      {celebration?.kind === 'success' && <ConfettiRain seed={celebration.id} />}
+      <SparkleBursts bursts={sparkles} />
+      <header className="relative flex items-center gap-3 overflow-hidden bg-gradient-to-r from-sidebar via-sidebar to-brand-700 px-4 py-3 text-white">
+        <span className="pointer-events-none absolute -right-10 -top-16 h-40 w-40 rounded-full bg-brand-500/20 blur-2xl" aria-hidden />
+        <span className="avatar-bob relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/20">
           <Bot className="h-5 w-5" />
-          <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-sidebar bg-emerald-400" aria-hidden />
+          <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
+            <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60 motion-safe:animate-ping" />
+            <span className="relative inline-flex h-3 w-3 rounded-full border-2 border-sidebar bg-emerald-400" />
+          </span>
         </span>
-        <div className="min-w-0 flex-1 leading-tight">
+        <div className="relative min-w-0 flex-1 leading-tight">
           <p className="truncate text-sm font-semibold">TimeTrack Assistant</p>
-          <p className="truncate text-[11px] text-sidebar-muted">Here to help you get around</p>
+          <p className="truncate text-[11px] text-slate-300">Online · replies instantly</p>
         </div>
-        <button type="button" onClick={restart} className="rounded-md p-1.5 text-sidebar-muted hover:bg-sidebar-hover hover:text-white" aria-label="Start over" title="Start over">
+        <button type="button" onClick={restart} className="relative rounded-lg p-1.5 text-slate-300 hover:bg-white/10 hover:text-white" aria-label="Start over" title="Start over">
           <RotateCcw className="h-4 w-4" />
         </button>
         {focus ? (
-          <button type="button" onClick={close} className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-sidebar-muted hover:bg-sidebar-hover hover:text-white">
+          <button type="button" onClick={close} className="relative inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-white/10 hover:text-white">
             Skip to dashboard <X className="h-4 w-4" />
           </button>
         ) : (
-          <button type="button" onClick={close} className="rounded-md p-1.5 text-sidebar-muted hover:bg-sidebar-hover hover:text-white" aria-label="Minimise assistant" title="Minimise">
+          <button type="button" onClick={close} className="relative rounded-lg p-1.5 text-slate-300 hover:bg-white/10 hover:text-white" aria-label="Minimise assistant" title="Minimise">
             <Minus className="h-4 w-4" />
           </button>
         )}
       </header>
 
-      <div ref={scroller} role="log" aria-live="polite" className={cn('flex-1 overflow-y-auto bg-slate-50', focus ? 'space-y-4 px-5 py-6 sm:px-8' : 'space-y-3 px-4 py-4')}>
+      <div ref={scroller} role="log" aria-live="polite" className={cn('chat-dots flex-1 overflow-y-auto bg-slate-50', focus ? 'space-y-4 px-5 py-5 sm:px-8' : 'space-y-3.5 px-4 py-4')}>
         {focus && (
-          <div className="flex flex-col items-center pb-2 text-center">
-            <span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-600 text-white shadow-pop">
-              <Bot className="h-8 w-8" />
-            </span>
-            <h2 className="mt-4 text-xl font-semibold text-slate-900 sm:text-2xl">Welcome back, {firstName}</h2>
-            <p className="mt-1 text-sm text-slate-500">Tell me where you&apos;d like to start, and I&apos;ll take you there.</p>
+          <div className="msg-in-left relative overflow-hidden rounded-2xl bg-gradient-to-br from-brand-600 via-brand-700 to-sidebar px-5 py-5 text-white shadow-pop sm:px-6">
+            <span className="pointer-events-none absolute -right-12 -top-12 h-44 w-44 rounded-full bg-white/10" aria-hidden />
+            <span className="pointer-events-none absolute -bottom-16 right-24 h-32 w-32 rounded-full bg-brand-400/20" aria-hidden />
+            <div className="relative flex items-center gap-4">
+              <span className="hidden h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-white/15 ring-1 ring-white/25 sm:flex">
+                <Bot className="h-7 w-7" />
+              </span>
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-brand-100">
+                  {formatDate(todayISO(), { weekday: 'long', day: 'numeric', month: 'long' })}
+                </p>
+                <h2 className="mt-1 text-xl font-semibold sm:text-2xl">
+                  Welcome back, {firstName} <span className="wave-hand" aria-hidden>👋</span>
+                </h2>
+                <p className="mt-1 text-sm text-brand-100">Tell me where you&apos;d like to start, and I&apos;ll take you there.</p>
+              </div>
+            </div>
+            <div className="relative mt-4 flex flex-wrap gap-2 text-xs">
+              {weekHours !== null && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
+                  <Clock className="h-3.5 w-3.5" /> {formatHoursShort(weekHours)} logged this week
+                </span>
+              )}
+              {role !== 'associate' && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
+                  <CheckSquare className="h-3.5 w-3.5" /> {counts.approvals} timesheet {counts.approvals === 1 ? 'entry' : 'entries'} to review
+                </span>
+              )}
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1 ring-1 ring-white/20">
+                <Bell className="h-3.5 w-3.5" /> {attentionCount ? `${attentionCount} thing${attentionCount === 1 ? ' needs' : 's need'} attention` : 'All caught up'}
+              </span>
+            </div>
           </div>
         )}
         {messages.map((m) =>
           m.from === 'user' ? (
-            <div key={m.id} className="flex justify-end">
-              <p className={cn('toast-in max-w-[80%] rounded-2xl rounded-tr-sm bg-brand-600 text-white', focus ? 'px-4 py-2.5 text-[15px]' : 'px-3.5 py-2 text-sm')}>{m.text}</p>
+            <div key={m.id} className="msg-in-right flex flex-col items-end">
+              <p
+                className={cn(
+                  'max-w-[80%] rounded-2xl rounded-tr-md bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-sm',
+                  focus ? 'px-4 py-2.5 text-[15px]' : 'px-3.5 py-2 text-sm',
+                )}
+              >
+                {m.text}
+              </p>
+              <span className="mt-1 text-[10px] text-slate-400">{timeLabel(m.at)}</span>
             </div>
           ) : (
-            <div key={m.id} className="toast-in flex gap-2">
-              <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-100 text-brand-700">
-                <Bot className="h-4 w-4" />
-              </span>
+            <div key={m.id} className="msg-in-left flex gap-2.5">
+              {botAvatar}
               <div className="min-w-0 flex-1">
-                <p
-                  className={cn(
-                    'w-fit max-w-full whitespace-pre-line rounded-2xl rounded-tl-sm bg-white text-slate-700 ring-1 ring-slate-200',
-                    focus ? 'px-4 py-3 text-[15px]' : 'px-3.5 py-2.5 text-sm',
-                  )}
-                >
-                  {m.text}
-                </p>
+                <div className={cn('relative w-fit max-w-full', m.tone === 'success' && 'pop-bounce')}>
+                  <p
+                    className={cn(
+                      'whitespace-pre-line rounded-2xl rounded-tl-md shadow-sm ring-1',
+                      m.tone === 'success' ? 'bg-emerald-50 text-emerald-900 ring-emerald-200' : 'bg-white text-slate-700 ring-slate-200/80',
+                      focus ? 'px-4 py-3 text-[15px]' : 'px-3.5 py-2.5 text-sm',
+                    )}
+                  >
+                    {m.tone === 'success' && <DrawnCheck />}
+                    {m.tone === 'success' ? m.text.replace(/^✅\s*/, '') : m.text}
+                  </p>
+                  {m.tone === 'success' && <Celebration />}
+                </div>
+                {m.card?.kind === 'week' && <WeekCard card={m.card} />}
+                {m.card?.kind === 'summary' && <SummaryCard card={m.card} />}
                 {renderOptions(m)}
+                <span className="mt-1 block text-[10px] text-slate-400">{timeLabel(m.at)}</span>
               </div>
             </div>
           ),
         )}
         {typing && (
-          <div className="flex items-center gap-2" aria-label="Assistant is typing">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-100 text-brand-700">
-              <Bot className="h-4 w-4" />
-            </span>
-            <span className="flex gap-1 rounded-2xl rounded-tl-sm bg-white px-3.5 py-3 ring-1 ring-slate-200">
-              {[0, 150, 300].map((delay) => (
-                <span key={delay} className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400" style={{ animationDelay: `${delay}ms` }} />
+          <div className="msg-in-left flex items-center gap-2.5" aria-label="Assistant is typing">
+            {botAvatar}
+            <span className="flex items-center gap-1 rounded-2xl rounded-tl-md bg-white px-4 py-3.5 shadow-sm ring-1 ring-slate-200/80">
+              {[0, 160, 320].map((delay) => (
+                <span key={delay} className="typing-dot h-2 w-2 rounded-full bg-brand-400" style={{ animationDelay: `${delay}ms` }} />
               ))}
             </span>
           </div>
         )}
       </div>
 
-      <form onSubmit={submit} className={cn('flex items-center gap-2 border-t border-slate-200 bg-white', focus ? 'px-5 py-3 sm:px-8' : 'px-3 py-2.5')}>
-        <input
-          ref={input}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder='Try "timesheet", "leave" or "courses"'
-          maxLength={200}
-          aria-label="Message the assistant"
-          className="min-w-0 flex-1 rounded-full border border-slate-200 bg-slate-50 px-3.5 py-2 text-sm placeholder:text-slate-400 focus:border-brand-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-brand-100"
-        />
-        <button
-          type="submit"
-          disabled={!draft.trim() || typing}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white transition-colors hover:bg-brand-700 disabled:bg-slate-300"
-          aria-label="Send"
-        >
-          <SendHorizontal className="h-4 w-4" />
-        </button>
+      <form onSubmit={submit} className={cn('border-t border-slate-200 bg-white', focus ? 'px-5 py-3 sm:px-8' : 'px-3 py-2.5')}>
+        <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 py-1 pl-3.5 pr-1 transition-shadow focus-within:border-brand-400 focus-within:bg-white focus-within:ring-4 focus-within:ring-brand-100">
+          <Sparkles className="h-4 w-4 shrink-0 text-brand-400" aria-hidden />
+          <input
+            ref={input}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={TYPING_HINTS[hintIndex]}
+            maxLength={200}
+            aria-label="Message the assistant"
+            className="min-w-0 flex-1 border-0 bg-transparent py-1.5 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-0"
+          />
+          <button
+            type="submit"
+            disabled={!draft.trim() || typing}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-sm transition-all hover:scale-105 disabled:scale-100 disabled:from-slate-300 disabled:to-slate-300 disabled:shadow-none"
+            aria-label="Send"
+          >
+            <SendHorizontal className="h-4 w-4" />
+          </button>
+        </div>
       </form>
     </section>
   );
@@ -919,16 +1112,30 @@ export function AssistantWidget({ role }: { role: Role }) {
           panel
         ))}
 
+      {peek && !open && (
+        <div className="peek-bubble pointer-events-none fixed bottom-[5.75rem] right-4 z-40 max-w-[220px] rounded-2xl rounded-br-md bg-white px-4 py-2.5 text-sm text-slate-700 shadow-pop ring-1 ring-slate-200 sm:right-6" role="status">
+          <span className="font-semibold text-slate-900">I&apos;m right here</span> <span aria-hidden>✨</span>
+          <br />
+          <span className="text-xs text-slate-500">Tap me whenever you need a hand.</span>
+        </div>
+      )}
+
       {!(open && focus) && (
         <button
           ref={launcher}
           type="button"
           onClick={() => (open ? close() : setOpen(true))}
-          className="fixed bottom-5 right-4 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-brand-600 text-white shadow-pop transition-transform hover:scale-105 hover:bg-brand-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-200 sm:right-6"
+          className="group fixed bottom-5 right-4 z-40 flex h-14 min-w-14 items-center justify-center rounded-full bg-gradient-to-br from-brand-500 to-brand-700 px-4 text-white shadow-pop transition-all hover:shadow-2xl focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-200 sm:right-6"
           aria-label={open ? 'Close assistant' : 'Open assistant'}
           aria-expanded={open}
         >
-          {open ? <X className="h-6 w-6" /> : <MessageCircle className="h-6 w-6" />}
+          {!open && attentionCount > 0 && <span className="pointer-events-none absolute inset-0 rounded-full bg-brand-500 opacity-30 motion-safe:animate-ping" aria-hidden />}
+          <span className="relative">{open ? <X className="h-6 w-6" /> : <MessageCircle className="h-6 w-6" />}</span>
+          {!open && (
+            <span className="relative max-w-0 overflow-hidden whitespace-nowrap text-sm font-semibold transition-all duration-300 group-hover:ml-2 group-hover:max-w-[120px] group-focus-visible:ml-2 group-focus-visible:max-w-[120px]">
+              Need a hand?
+            </span>
+          )}
           {!open && attentionCount > 0 && (
             <span className="absolute -right-0.5 -top-0.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold text-white ring-2 ring-white">
               {attentionCount}
@@ -937,5 +1144,109 @@ export function AssistantWidget({ role }: { role: Role }) {
         </button>
       )}
     </>
+  );
+}
+
+const TYPING_HINTS = [
+  'Try "plan leave in December"',
+  'Try "what needs my attention?"',
+  'Try "my timesheet"',
+  'Try "open my courses"',
+  'Try "request overtime"',
+];
+
+/** A suggested leave day as a small calendar page. */
+function DateTile({ option, delay, onPick }: { option: Option; delay: number; onPick: (event: MouseEvent<HTMLButtonElement>) => void }) {
+  const d = new Date(`${option.date}T00:00:00Z`);
+  const part = (opts: Intl.DateTimeFormatOptions) => d.toLocaleDateString('en-GB', { ...opts, timeZone: 'UTC' });
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      aria-label={option.label}
+      title={option.label}
+      style={{ animationDelay: `${delay}ms` }}
+      className="flip-in group flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white text-center shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand-400 hover:shadow-pop focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-100"
+    >
+      <span className="bg-gradient-to-r from-brand-500 to-brand-700 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white">{part({ month: 'short' })}</span>
+      <span className="pt-1.5 text-xl font-bold leading-none text-slate-900 group-hover:text-brand-700">{part({ day: 'numeric' })}</span>
+      <span className="pb-1 text-[11px] text-slate-500">{part({ weekday: 'short' })}</span>
+      {option.tag && <span className="mx-1 mb-1.5 truncate rounded-md bg-teal-50 px-1 py-px text-[9px] font-medium text-teal-700">{option.tag}</span>}
+    </button>
+  );
+}
+
+function WeekCard({ card }: { card: Extract<Card, { kind: 'week' }> }) {
+  const pct = (h: number) => `${Math.min(100, (h / Math.max(card.target, card.hours, 1)) * 100)}%`;
+  return (
+    <div className="msg-in-left mt-2 w-full max-w-[360px] rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold text-slate-900">{card.title}</p>
+        <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-semibold text-brand-700 ring-1 ring-brand-100">{card.status}</span>
+      </div>
+      <div className="mt-2 flex items-baseline gap-1.5">
+        <span className="text-2xl font-bold tabular-nums text-slate-900">{formatHoursShort(card.hours)}</span>
+        <span className="text-xs text-slate-500">of {card.target} h target</span>
+      </div>
+      <div className="mt-2 flex h-2 overflow-hidden rounded-full bg-slate-100" aria-hidden>
+        {card.projects.map((p) => (
+          <span key={p.name} className="h-full transition-all" style={{ width: pct(p.hours), background: p.color }} />
+        ))}
+      </div>
+      {card.projects.length > 0 && (
+        <ul className="mt-2.5 space-y-1 text-xs">
+          {card.projects.map((p) => (
+            <li key={p.name} className="flex items-center gap-2 text-slate-600">
+              <span className="h-2 w-2 shrink-0 rounded-sm" style={{ background: p.color }} />
+              <span className="min-w-0 flex-1 truncate">{p.name}</span>
+              <span className="font-semibold tabular-nums text-slate-800">{formatHoursShort(p.hours)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function SummaryCard({ card }: { card: Extract<Card, { kind: 'summary' }> }) {
+  return (
+    <div className="msg-in-left mt-2 w-full max-w-[360px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="flex items-center gap-2 bg-gradient-to-r from-brand-600 to-brand-700 px-3.5 py-2 text-xs font-semibold text-white">
+        <CalendarCheck className="h-4 w-4" /> {card.title}
+      </div>
+      <dl className="divide-y divide-dashed divide-slate-200 px-3.5">
+        {card.rows.map((r) => (
+          <div key={r.label} className="flex justify-between gap-4 py-2 text-xs">
+            <dt className="text-slate-500">{r.label}</dt>
+            <dd className="text-right font-medium text-slate-800">{r.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+/** A short burst of coloured confetti around a success message (plays once; hidden for reduced motion). */
+function Celebration() {
+  const bits = [
+    { dx: '-46px', dy: '-30px', c: 'bg-brand-500' },
+    { dx: '-20px', dy: '-44px', c: 'bg-teal-400' },
+    { dx: '12px', dy: '-48px', c: 'bg-amber-400' },
+    { dx: '40px', dy: '-34px', c: 'bg-violet-400' },
+    { dx: '56px', dy: '-6px', c: 'bg-brand-300' },
+    { dx: '-58px', dy: '-4px', c: 'bg-amber-300' },
+    { dx: '30px', dy: '-56px', c: 'bg-emerald-400' },
+    { dx: '-34px', dy: '-54px', c: 'bg-rose-300' },
+  ];
+  return (
+    <span className="pointer-events-none absolute left-8 top-3" aria-hidden>
+      {bits.map((b, i) => (
+        <span
+          key={i}
+          className={cn('confetti-bit absolute h-1.5 w-1.5 rounded-sm', b.c)}
+          style={{ ['--dx' as string]: b.dx, ['--dy' as string]: b.dy, animationDelay: `${i * 25}ms` }}
+        />
+      ))}
+    </span>
   );
 }
