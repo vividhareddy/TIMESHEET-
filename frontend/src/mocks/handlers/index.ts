@@ -2,6 +2,7 @@ import { authRoutes } from './auth';
 import { coreRoutes } from './core';
 import { workflowRoutes } from './workflow';
 import { reportRoutes } from './reports';
+import { lmsRoutes } from './lms';
 
 /** Order matters: specific paths (e.g. /timesheets/me/draft) are listed before /timesheets/:id. */
-export const routes = [...authRoutes, ...coreRoutes, ...workflowRoutes, ...reportRoutes];
+export const routes = [...authRoutes, ...coreRoutes, ...workflowRoutes, ...reportRoutes, ...lmsRoutes];

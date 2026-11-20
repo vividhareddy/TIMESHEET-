@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
+import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import { config } from '../config.js';
 import { currentUser, requireAuth } from '../auth.js';
@@ -43,4 +44,54 @@ lmsRouter.post('/launch', requireAuth, async (_req, res) => {
   );
   res.setHeader('Cache-Control', 'no-store');
   res.json({ url: `${config.lms.url}/api/auth/timesheet?${new URLSearchParams({ ticket })}` });
+});
+
+/**
+ * GET /api/lms/courses — the LMS course catalogue, for the assistant ("how many courses", "technical courses").
+ * Read-only from the LMS's own collections in the shared MongoDB database (prefix LMS_COLLECTION_PREFIX, default
+ * "lms_"). Only published courses open to every employee are listed; department-only courses are left out, so the
+ * assistant never shows a course the person could not open. No progress or personal data is returned.
+ */
+export interface CatalogCourse {
+  id: string;
+  title: string;
+  category: string;
+  description: string;
+  difficulty: string;
+  durationMinutes: number;
+  lessonCount: number;
+}
+
+lmsRouter.get('/courses', requireAuth, async (_req, res) => {
+  const db = mongoose.connection.db;
+  if (!db) throw new HttpError(503, 'The database is unavailable. Please try again shortly.');
+  const prefix = process.env.LMS_COLLECTION_PREFIX || 'lms_';
+  const rows = await db
+    .collection(`${prefix}courses`)
+    .find(
+      { status: 'published', $or: [{ visibility: { $ne: 'department' } }, { department_id: { $in: [null, ''] } }] },
+      { projection: { _id: 0, id: 1, title: 1, category: 1, description: 1, difficulty: 1, duration_minutes: 1 } },
+    )
+    .toArray();
+  const ids = rows.map((r) => String(r.id));
+  const lessonCounts = ids.length
+    ? await db
+        .collection(`${prefix}course_lessons`)
+        .aggregate<{ _id: string; n: number }>([{ $match: { course_id: { $in: ids } } }, { $group: { _id: '$course_id', n: { $sum: 1 } } }])
+        .toArray()
+    : [];
+  const lessons = new Map(lessonCounts.map((c) => [c._id, c.n]));
+  const courses: CatalogCourse[] = rows
+    .map((r) => ({
+      id: String(r.id),
+      title: String(r.title ?? ''),
+      category: String(r.category ?? 'Other'),
+      description: String(r.description ?? ''),
+      difficulty: String(r.difficulty ?? ''),
+      durationMinutes: Number(r.duration_minutes) || 0,
+      lessonCount: lessons.get(String(r.id)) ?? 0,
+    }))
+    .sort((a, b) => a.title.localeCompare(b.title));
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ total: courses.length, courses });
 });

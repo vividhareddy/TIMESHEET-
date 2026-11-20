@@ -199,6 +199,21 @@ export interface TeamAvailability {
   days: { date: ISODate; people: { name: string; duration: LeaveDuration; status: 'pending' | 'approved' }[] }[];
 }
 
+/** GET /lms/courses — the LMS catalogue (published courses open to everyone). */
+export interface CatalogCourse {
+  id: string;
+  title: string;
+  category: string;
+  description: string;
+  difficulty: string;
+  durationMinutes: number;
+  lessonCount: number;
+}
+export interface CourseCatalog {
+  total: number;
+  courses: CatalogCourse[];
+}
+
 export interface LeaveApplyRequest {
   date: ISODate;
   duration: LeaveDuration;

@@ -3,7 +3,7 @@ import { lmsService } from '@/services';
 import { useToast } from '@/context/ToastContext';
 
 /** LMS pages that can be opened directly (they are the LMS's own #page routes). */
-export type LmsPage = 'courses' | 'catalog' | 'certificates' | 'calendar';
+export type LmsPage = 'courses' | 'catalog' | 'certificates' | 'calendar' | 'assessments';
 
 /**
  * Opens the LMS in a new tab, already signed in with the timesheet account, optionally on a given page.

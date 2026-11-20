@@ -3,6 +3,14 @@ import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
   ArrowRight,
+  Briefcase,
+  CalendarDays,
+  ClipboardCheck,
+  LayoutDashboard,
+  LayoutGrid,
+  Settings,
+  Users,
+  Video,
   Award,
   BarChart3,
   Bell,
@@ -30,8 +38,8 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { LeaveDuration, Role, TimesheetStatus } from '@/types';
-import type { TeamAvailability } from '@/types/api';
-import { IS_MOCK_MODE, leaveService } from '@/services';
+import type { CatalogCourse, TeamAvailability } from '@/types/api';
+import { IS_MOCK_MODE, leaveService, lmsService } from '@/services';
 import { useAppData } from '@/context/AppDataContext';
 import { useCurrentUser, useLookups } from '@/hooks/useLookups';
 import { useNotifications } from '@/hooks/useNotifications';
@@ -39,8 +47,21 @@ import { useLmsLauncher, type LmsPage } from '@/hooks/useLmsLauncher';
 import { currentWeekStart, formatDate, formatWeekRange, todayISO } from '@/utils/date';
 import { deriveTimesheetStatus, entryTotal, findHoliday, isWorkingDay, timesheetTotal } from '@/utils/timesheet';
 import { cn } from '@/utils/format';
+import { PROJECT_COLOR_PALETTE } from '@/constants/ui';
 import { takeSignInGreeting } from './greeting';
 import { ConfettiRain, DrawnCheck, PartyBurst, Sparkles as SparkleBursts, type SparkleBurst } from './celebrations';
+import {
+  asksForCategories,
+  asksForCount,
+  asksWhatICanDo,
+  featuresFor,
+  isCourseQuestion,
+  matchCategories,
+  pickRandom,
+  searchCourses,
+  searchFeatures,
+  type Feature,
+} from './knowledge';
 import { addMonths, dayLabel, monthLabel, monthOf, parseDates, parseMonth, suggestLeaveDays, type ISODate } from './leavePlanner';
 
 /**
@@ -62,7 +83,13 @@ type LeaveStep =
   | { to: 'send' }
   | { to: 'cancel' };
 
-type Action = { kind: 'node'; node: NodeId } | { kind: 'nav'; to: string } | { kind: 'lms'; page?: LmsPage } | { kind: 'leave'; step: LeaveStep };
+type Action =
+  | { kind: 'node'; node: NodeId }
+  | { kind: 'nav'; to: string }
+  | { kind: 'lms'; page?: LmsPage }
+  | { kind: 'leave'; step: LeaveStep }
+  /** Course answers: the overview, or one category's courses. */
+  | { kind: 'courses'; category?: string };
 
 /** Where the leave planner is waiting for the user's answer (typed or tapped). */
 interface PlanState {
@@ -89,6 +116,8 @@ interface Option {
   accent?: Accent;
   /** A suggested leave day: shown as a small calendar tile instead of a button pill. */
   date?: ISODate;
+  /** An LMS course: shown as a course card. */
+  course?: CatalogCourse;
   /** Short note on a calendar tile, e.g. "Long weekend". */
   tag?: string;
   action: Action;
@@ -105,7 +134,17 @@ const ACCENTS: Record<Accent, string> = {
 /** Rich content shown inside a bot message. */
 type Card =
   | { kind: 'week'; title: string; hours: number; target: number; status: string; projects: { name: string; color: string; hours: number }[] }
-  | { kind: 'summary'; title: string; rows: { label: string; value: string }[]; footer?: string };
+  | { kind: 'summary'; title: string; rows: { label: string; value: string }[]; footer?: string }
+  | { kind: 'list'; title: string; rows: ListRow[] };
+
+type Tone = 'green' | 'amber' | 'red' | 'blue' | 'slate';
+interface ListRow {
+  primary: string;
+  secondary?: string;
+  badge?: string;
+  tone?: Tone;
+  color?: string;
+}
 
 interface Message {
   id: number;
@@ -161,7 +200,7 @@ const formatHoursShort = (hours: number) => `${Number.isInteger(hours) ? hours :
 function intentFor(text: string): NodeId {
   const t = text.toLowerCase();
   if (
-    /\b(leaves?|vacation|holidays?|time ?off|days? off|break)\b/.test(t) &&
+    /\b(leaves?|vacation|time ?off|days? off|break)\b/.test(t) &&
     /\b(suggest\w*|plan\w*|recommend\w*|best|free|clash\w*|when|which|good|ideas?|options?|available|availability)\b/.test(t)
   )
     return 'plan';
@@ -178,7 +217,7 @@ function intentFor(text: string): NodeId {
 export function AssistantWidget({ role }: { role: Role }) {
   const navigate = useNavigate();
   const user = useCurrentUser();
-  const { timesheets, leaves, calendars, applyLeave } = useAppData();
+  const { timesheets, leaves, calendars, applyLeave, allocations, projects } = useAppData();
   const { employeeName, project } = useLookups();
   const { counts, items } = useNotifications();
   const lms = useLmsLauncher();
@@ -322,10 +361,12 @@ export function AssistantWidget({ role }: { role: Role }) {
   }
 
   function lmsStep(): Reply {
-    if (IS_MOCK_MODE) return { text: "The LMS isn't available in mock mode. Connect the real API to use it.", options: [BACK] };
+    const explore: Option = { id: 'lms-explore', label: 'Explore courses', icon: LayoutGrid, action: { kind: 'courses' } };
+    if (IS_MOCK_MODE) return { text: "The LMS itself isn't available in mock mode, but you can explore the sample course catalogue.", options: [explore, BACK] };
     return {
       text: "The LMS opens in a new tab and you're signed in automatically. Where would you like to start?",
       options: [
+        explore,
         { id: 'lms-courses', label: 'Continue my learning', icon: BookOpen, action: { kind: 'lms', page: 'courses' } },
         { id: 'lms-catalog', label: 'Browse courses', icon: LibraryBig, action: { kind: 'lms', page: 'catalog' } },
         { id: 'lms-certs', label: 'My certificates', icon: Award, action: { kind: 'lms', page: 'certificates' } },
@@ -412,6 +453,205 @@ export function AssistantWidget({ role }: { role: Role }) {
     },
     [push],
   );
+
+
+  // ------------------------------------------------------------------ lookups: courses, holidays, leave, projects, features
+
+  const catalog = useRef<Promise<CatalogCourse[]> | null>(null);
+  const loadCatalog = () => {
+    if (!catalog.current) {
+      catalog.current = lmsService.courses().then((r) => r.courses);
+      catalog.current.catch(() => {
+        catalog.current = null;
+      });
+    }
+    return catalog.current;
+  };
+
+  const lmsAction = (page: LmsPage): Action => (IS_MOCK_MODE ? { kind: 'node', node: 'lms' } : { kind: 'lms', page });
+  const courseOption = (c: CatalogCourse): Option => ({ id: `course-${c.id}`, label: c.title, course: c, action: lmsAction('catalog') });
+  const seeAllCourses = (total: number): Option => ({ id: 'see-all-courses', label: `See all ${total} courses`, icon: LibraryBig, action: lmsAction('catalog') });
+
+  /** Answers course questions: an overview with four random courses, one or more categories, or a keyword search. */
+  const courseReply = async (ask: { text?: string; category?: string }): Promise<Reply> => {
+    const courses = await loadCatalog();
+    if (!courses.length) return { text: "I couldn't find any courses in the LMS yet.", options: [BACK] };
+    const perCategory = new Map<string, number>();
+    for (const c of courses) perCategory.set(c.category, (perCategory.get(c.category) ?? 0) + 1);
+    const categoryOptions = (skip: string[] = [], max = 6): Option[] =>
+      [...perCategory.entries()]
+        .filter(([c]) => !skip.includes(c))
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, max)
+        .map(([c, n]) => ({ id: `cat-${c}`, label: `${c} (${n})`, icon: LayoutGrid, action: { kind: 'courses', category: c } }));
+    const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+    const showList = (intro: string, list: CatalogCourse[], skip: string[]): Reply => {
+      const shown = list.slice(0, 6);
+      return {
+        text: list.length > shown.length ? `${intro}\n(Showing ${shown.length} of ${list.length}.)` : intro,
+        options: [...shown.map(courseOption), ...categoryOptions(skip, 4), seeAllCourses(courses.length), BACK],
+      };
+    };
+
+    const wanted = ask.category ? [ask.category] : ask.text ? matchCategories(ask.text, [...perCategory.keys()]) : [];
+    if (wanted.length) {
+      const list = courses.filter((c) => wanted.includes(c.category));
+      return showList(`Here ${list.length === 1 ? 'is the 1 course' : `are the ${list.length} courses`} in ${wanted.join(' and ')}:`, list, wanted);
+    }
+    const text = ask.text ?? '';
+    if (asksForCategories(text) && !asksForCount(text)) {
+      return {
+        text: `The LMS has ${plural(courses.length, 'course', 'courses')} in ${plural(perCategory.size, 'category', 'categories')}. Pick one to see its courses:`,
+        card: {
+          kind: 'list',
+          title: 'Course categories',
+          rows: [...perCategory.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => ({ primary: c, badge: plural(n, 'course', 'courses'), tone: 'blue', color: categoryColor(c) })),
+        },
+        options: [...categoryOptions([], 12), seeAllCourses(courses.length), BACK],
+      };
+    }
+    const hits = asksForCount(text) ? [] : searchCourses(text, courses);
+    if (hits.length) return showList(`I found ${plural(hits.length, 'course', 'courses')} matching your search:`, hits, []);
+    return {
+      text: `There ${courses.length === 1 ? 'is' : 'are'} ${plural(courses.length, 'course', 'courses')} in the LMS across ${plural(perCategory.size, 'category', 'categories')}. Here are ${Math.min(4, courses.length)} picked at random — tap a category to narrow it down:`,
+      options: [...pickRandom(courses, 4).map(courseOption), ...categoryOptions(), seeAllCourses(courses.length), BACK],
+    };
+  };
+
+  const calendarNav: Option =
+    role === 'associate'
+      ? { id: 'nav-cal', label: 'My calendar', icon: CalendarDays, action: { kind: 'nav', to: '/associate/calendar' } }
+      : role === 'manager'
+        ? { id: 'nav-cal', label: 'Team calendar', icon: CalendarRange, action: { kind: 'nav', to: '/manager/calendar' } }
+        : { id: 'nav-cal', label: 'Calendars', icon: CalendarDays, action: { kind: 'nav', to: '/admin/calendars' } };
+  const planOption: Option = { id: 'go-plan-2', label: 'Plan a leave', icon: CalendarSearch, action: { kind: 'node', node: 'plan' } };
+  const longDate = (d: ISODate) => formatDate(d, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+
+  const holidaysReply = (): Reply => {
+    const cal = calendars.find((c) => c.id === user.calendarId);
+    const next = (cal?.holidays ?? []).filter((h) => h.date >= todayISO()).sort((a, b) => a.date.localeCompare(b.date)).slice(0, 6);
+    if (!cal) return { text: "You don't have a holiday calendar assigned yet. Ask your administrator to set one.", options: [BACK] };
+    if (!next.length) return { text: `No more holidays are scheduled on your ${cal.name}.`, options: [calendarNav, planOption, BACK] };
+    return {
+      text: `Here ${next.length === 1 ? 'is the next holiday' : `are the next ${next.length} holidays`} on your ${cal.name}:`,
+      card: {
+        kind: 'list',
+        title: 'Upcoming holidays',
+        rows: next.map((h) => ({ primary: h.name, secondary: longDate(h.date), badge: h.type === 'public' ? 'Public' : 'Company', tone: h.type === 'public' ? 'blue' : 'slate' })),
+      },
+      options: [planOption, calendarNav, BACK],
+    };
+  };
+
+  const LEAVE_TONE: Record<string, Tone> = { approved: 'green', pending: 'amber', rejected: 'red' };
+  const leaveStatusReply = (): Reply => {
+    const mine = leaves.filter((l) => l.employeeId === user.id).sort((a, b) => b.date.localeCompare(a.date));
+    const pending = mine.filter((l) => l.status === 'pending').length;
+    const upcoming = mine.filter((l) => l.date >= todayISO() && l.status !== 'rejected').length;
+    const options: Option[] = [planOption, ...(role === 'associate' ? [{ id: 'lv-page', label: 'Leave Requests page', icon: Plane, action: { kind: 'nav', to: '/associate/leave' } } satisfies Option] : []), BACK];
+    if (!mine.length) return { text: "You haven't requested any leave yet. Want me to find clash-free dates?", options };
+    return {
+      text: `You have ${upcoming} upcoming leave day${upcoming === 1 ? '' : 's'}${pending ? `, ${pending} still waiting for approval` : ''}. Your latest requests:`,
+      card: {
+        kind: 'list',
+        title: 'My leave requests',
+        rows: mine.slice(0, 6).map((l) => ({
+          primary: longDate(l.date),
+          secondary: `${l.duration === 'half' ? 'Half day' : 'Full day'} · ${l.reason}`,
+          badge: l.status[0]!.toUpperCase() + l.status.slice(1),
+          tone: LEAVE_TONE[l.status] ?? 'slate',
+        })),
+      },
+      options,
+    };
+  };
+
+  const projectsReply = (): Reply => {
+    const today = todayISO();
+    if (role === 'associate') {
+      const mine = allocations.filter((a) => a.employeeId === user.id && a.endDate >= today).sort((a, b) => b.weeklyHours - a.weeklyHours);
+      const nav: Option = { id: 'nav-proj', label: 'My Projects page', icon: Briefcase, action: { kind: 'nav', to: '/associate/projects' } };
+      if (!mine.length) return { text: "You aren't allocated to any projects right now.", options: [nav, BACK] };
+      const total = mine.reduce((sum, a) => sum + a.weeklyHours, 0);
+      return {
+        text: `You're on ${mine.length} project${mine.length === 1 ? '' : 's'}, ${formatHoursShort(total)} a week in total:`,
+        card: {
+          kind: 'list',
+          title: 'My projects',
+          rows: mine.map((a) => ({
+            primary: project(a.projectId)?.name ?? 'Project',
+            secondary: `${a.projectRole} · until ${formatDate(a.endDate, { day: 'numeric', month: 'short', year: 'numeric' })}`,
+            badge: `${a.weeklyHours} h/wk`,
+            tone: 'blue',
+            color: project(a.projectId)?.color,
+          })),
+        },
+        options: [nav, BACK],
+      };
+    }
+    const list = projects.filter((p) => role === 'admin' || p.managerId === user.id);
+    const nav: Option = role === 'admin'
+      ? { id: 'nav-proj', label: 'Projects page', icon: Briefcase, action: { kind: 'nav', to: '/admin/projects' } }
+      : { id: 'nav-proj', label: 'Project Allocation', icon: Network, action: { kind: 'nav', to: '/manager/allocation' } };
+    if (!list.length) return { text: role === 'admin' ? 'There are no projects yet.' : "You don't manage any projects yet.", options: [nav, BACK] };
+    return {
+      text: `${role === 'admin' ? 'There are' : 'You manage'} ${list.length} project${list.length === 1 ? '' : 's'}${list.length > 6 ? ' — here are the first 6' : ''}:`,
+      card: {
+        kind: 'list',
+        title: role === 'admin' ? 'Projects' : 'My projects',
+        rows: list.slice(0, 6).map((p) => ({
+          primary: p.name,
+          secondary: p.client,
+          badge: allocations.filter((a) => a.projectId === p.id && a.endDate >= today).length + ' people',
+          tone: 'slate',
+          color: p.color,
+        })),
+      },
+      options: [nav, BACK],
+    };
+  };
+
+  const FEATURE_ICONS: Record<string, LucideIcon> = {
+    dash: LayoutDashboard, ts: Clock, subs: FileClock, proj: Briefcase, cal: CalendarDays, leave: Plane, ot: Timer, team: Users,
+    alloc: Network, appr: CheckSquare, rep: BarChart3, emp: Users, set: Settings, my: BookOpen, cat: LibraryBig, cert: Award,
+    live: Video, assess: ClipboardCheck, plan: CalendarSearch, att: Bell,
+  };
+  const featureOption = (f: Feature): Option => ({
+    id: `f-${f.id}`,
+    label: f.title,
+    hint: `${f.area === 'Timesheet' ? '' : `${f.area} · `}${f.description}`,
+    icon: FEATURE_ICONS[f.id.split('-')[1] ?? ''] ?? LayoutGrid,
+    accent: f.area === 'LMS' ? 'violet' : f.area === 'Assistant' ? 'teal' : 'brand',
+    action: f.to ? { kind: 'nav', to: f.to } : f.lms ? lmsAction(f.lms) : { kind: 'node', node: f.node ?? 'menu' },
+  });
+
+  const directoryReply = (): Reply => {
+    const all = featuresFor(role, true);
+    const count = (area: Feature['area']) => all.filter((f) => f.area === area).length;
+    return {
+      text: `Here's everything I can take you to: ${count('Timesheet')} timesheet pages, ${count('LMS') ? `${count('LMS')} LMS pages, ` : ''}and ${count('Assistant')} things I do myself. You can also ask me about courses, holidays, your leave or your projects.`,
+      options: [...all.map(featureOption), BACK],
+    };
+  };
+
+  /** Typed questions answered from data (courses, holidays, leave, projects, the feature list), or null. */
+  const lookup = (text: string): (() => Promise<Reply>) | null => {
+    const t = text.toLowerCase();
+    if (asksWhatICanDo(t)) return async () => directoryReply();
+    if (isCourseQuestion(t)) return () => courseReply({ text });
+    if (/\bholidays?\b/.test(t)) return async () => holidaysReply();
+    if ((/\bleaves?\b/.test(t) && /\b(status|requests?|history|applied|pending|approved|rejected|taken|upcoming|booked)\b/.test(t)) || /\bmy leaves?\b/.test(t))
+      return async () => leaveStatusReply();
+    if (/\b(projects?|allocations?|allocated)\b/.test(t) && !/\b(timesheet|hours|log)\b/.test(t)) return async () => projectsReply();
+    return null;
+  };
+
+  /** Anything else: look it up in the feature directory. */
+  const featureSearchReply = (text: string): Reply | null => {
+    const found = searchFeatures(text, role, true);
+    if (!found.length) return null;
+    return { text: found.length === 1 ? 'I think this is what you are looking for:' : "Here's what I found:", options: [...found.map(featureOption), BACK] };
+  };
 
   // ------------------------------------------------------------------ leave planner
 
@@ -782,6 +1022,10 @@ export function AssistantWidget({ role }: { role: Role }) {
       return;
     }
     resetPlan();
+    if (action.kind === 'courses') {
+      botSaysAsync(() => courseReply({ category: action.category }));
+      return;
+    }
     if (action.kind === 'node') {
       if (action.node === 'plan') startPlan(null);
       else botSays(action.node);
@@ -815,8 +1059,17 @@ export function AssistantWidget({ role }: { role: Role }) {
     }
     if (answerPlanner(text)) return;
     const intent = intentFor(text);
-    if (intent === 'plan') startPlan(parseMonth(text, todayISO()));
-    else botSays(intent);
+    if (intent === 'plan') return startPlan(parseMonth(text, todayISO()));
+    const answer = intent === 'thanks' || intent === 'menu' ? null : lookup(text);
+    if (answer) return botSaysAsync(answer);
+    // Feature search answers anything not otherwise understood, and LMS pages (live training, exams, certificates)
+    // win over a loose keyword match such as "week" sending "live sessions this week" to the timesheet.
+    const lmsHit = searchFeatures(text, role, true)[0]?.area === 'LMS';
+    if (intent === 'fallback' || (lmsHit && intent !== 'leave' && intent !== 'overtime')) {
+      const found = featureSearchReply(text);
+      if (found) return later(() => push('bot', found.text, found.options));
+    }
+    botSays(intent);
   };
 
   const restart = () => {
@@ -884,10 +1137,26 @@ export function AssistantWidget({ role }: { role: Role }) {
       );
     }
 
+    const courseOpts = m.options.filter((o) => o.course);
     const dates = m.options.filter((o) => o.date);
-    const rest = m.options.filter((o) => !o.date);
+    const rest = m.options.filter((o) => !o.date && !o.course);
     return (
       <>
+        {courseOpts.length > 0 && (
+          <div className={cn('mt-2.5 grid gap-2.5', focus ? 'sm:grid-cols-2' : 'grid-cols-1')}>
+            {courseOpts.map((o, i) => (
+              <CourseTile
+                key={o.id}
+                option={o}
+                delay={i * 70}
+                onPick={(e) => {
+                  sparkle(e);
+                  choose(o);
+                }}
+              />
+            ))}
+          </div>
+        )}
         {dates.length > 0 && (
           <div className={cn('mt-2.5 grid gap-2', focus ? 'grid-cols-3 sm:grid-cols-6' : 'grid-cols-3')}>
             {dates.map((o, i) => (
@@ -1057,6 +1326,7 @@ export function AssistantWidget({ role }: { role: Role }) {
                 </div>
                 {m.card?.kind === 'week' && <WeekCard card={m.card} />}
                 {m.card?.kind === 'summary' && <SummaryCard card={m.card} />}
+                {m.card?.kind === 'list' && <ListCard card={m.card} />}
                 {renderOptions(m)}
                 <span className="mt-1 block text-[10px] text-slate-400">{timeLabel(m.at)}</span>
               </div>
@@ -1148,12 +1418,76 @@ export function AssistantWidget({ role }: { role: Role }) {
 }
 
 const TYPING_HINTS = [
+  'Try "how many courses are in the LMS?"',
+  'Try "show me the technical courses"',
+  'Try "upcoming holidays"',
+  'Try "what can you do?"',
   'Try "plan leave in December"',
   'Try "what needs my attention?"',
   'Try "my timesheet"',
   'Try "open my courses"',
   'Try "request overtime"',
 ];
+
+const categoryColor = (category: string) =>
+  PROJECT_COLOR_PALETTE[[...category].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7) % PROJECT_COLOR_PALETTE.length]!;
+
+const courseLength = (minutes: number) => (!minutes ? null : minutes < 60 ? `${minutes} min` : `${Math.round(minutes / 60)} h`);
+
+/** An LMS course as a small card; tapping it opens the LMS catalogue. */
+function CourseTile({ option, delay, onPick }: { option: Option; delay: number; onPick: (event: MouseEvent<HTMLButtonElement>) => void }) {
+  const c = option.course!;
+  const color = categoryColor(c.category);
+  const meta = [c.difficulty && c.difficulty[0]!.toUpperCase() + c.difficulty.slice(1), c.lessonCount ? `${c.lessonCount} lesson${c.lessonCount === 1 ? '' : 's'}` : null, courseLength(c.durationMinutes)].filter(Boolean);
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      title={`${c.title} — open in the LMS`}
+      style={{ animationDelay: `${delay}ms` }}
+      className="chip-in group relative flex overflow-hidden rounded-xl border border-slate-200 bg-white text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-pop focus:outline-none focus-visible:ring-4 focus-visible:ring-brand-100"
+    >
+      <span className="w-1.5 shrink-0" style={{ background: color }} aria-hidden />
+      <span className="min-w-0 flex-1 px-3.5 py-3">
+        <span className="block truncate text-[10px] font-semibold uppercase tracking-wider" style={{ color }}>
+          {c.category}
+        </span>
+        <span className="mt-0.5 line-clamp-2 block text-sm font-semibold leading-snug text-slate-900 group-hover:text-brand-700">{c.title}</span>
+        {c.description && <span className="mt-1 line-clamp-1 block text-xs text-slate-500">{c.description}</span>}
+        {meta.length > 0 && <span className="mt-1.5 block text-[11px] font-medium text-slate-400">{meta.join(' · ')}</span>}
+      </span>
+      <ArrowRight className="mr-3 h-4 w-4 shrink-0 self-center text-slate-300 transition-all group-hover:translate-x-0.5 group-hover:text-brand-600" />
+    </button>
+  );
+}
+
+const TONES: Record<Tone, string> = {
+  green: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
+  amber: 'bg-amber-50 text-amber-700 ring-amber-200',
+  red: 'bg-rose-50 text-rose-700 ring-rose-200',
+  blue: 'bg-brand-50 text-brand-700 ring-brand-100',
+  slate: 'bg-slate-100 text-slate-600 ring-slate-200',
+};
+
+function ListCard({ card }: { card: Extract<Card, { kind: 'list' }> }) {
+  return (
+    <div className="msg-in-left mt-2 w-full max-w-[420px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <p className="border-b border-slate-100 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700">{card.title}</p>
+      <ul className="divide-y divide-slate-100">
+        {card.rows.map((r, i) => (
+          <li key={i} className="chip-in flex items-center gap-2.5 px-3.5 py-2.5" style={{ animationDelay: `${i * 50}ms` }}>
+            {r.color && <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: r.color }} />}
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-medium text-slate-800">{r.primary}</span>
+              {r.secondary && <span className="block truncate text-xs text-slate-500">{r.secondary}</span>}
+            </span>
+            {r.badge && <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1', TONES[r.tone ?? 'slate'])}>{r.badge}</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 /** A suggested leave day as a small calendar page. */
 function DateTile({ option, delay, onPick }: { option: Option; delay: number; onPick: (event: MouseEvent<HTMLButtonElement>) => void }) {
